@@ -66,7 +66,7 @@ The model and chat database stay on this computer. The bundled inference worker 
 "@
 Set-Content -LiteralPath (Join-Path $portableRoot "README.txt") -Value $portableReadme -Encoding utf8NoBOM
 $portableArchive = Join-Path $artifactRoot "SendeyizGPT-Windows-x64-Portable.zip"
-Compress-Archive -LiteralPath (Join-Path $portableRoot "*") -DestinationPath $portableArchive -CompressionLevel Optimal
+Compress-Archive -Path (Join-Path $portableRoot "*") -DestinationPath $portableArchive -CompressionLevel Optimal
 Remove-Item -LiteralPath $portableRoot -Recurse -Force
 
 $manifest += [PSCustomObject]@{
