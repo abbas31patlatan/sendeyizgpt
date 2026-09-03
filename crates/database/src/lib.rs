@@ -43,9 +43,11 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, DatabaseE
         .map_err(DatabaseError::Migration)?;
 
     let current: i64 = connection
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_migrations", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
         .map_err(DatabaseError::Migration)?;
 
     if current > CURRENT_SCHEMA_VERSION {
@@ -80,7 +82,10 @@ pub fn migrate(connection: &mut Connection) -> Result<MigrationReport, DatabaseE
 
 fn migration(version: i64) -> Option<(&'static str, &'static str)> {
     match version {
-        1 => Some(("initial_domain_schema", include_str!("../migrations/0001_initial.sql"))),
+        1 => Some((
+            "initial_domain_schema",
+            include_str!("../migrations/0001_initial.sql"),
+        )),
         _ => None,
     }
 }
@@ -117,7 +122,9 @@ mod tests {
             .expect("pragma reads");
         assert_eq!(foreign_keys, 1);
         let version: i64 = connection
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("migration reads");
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
     }
@@ -141,4 +148,3 @@ mod tests {
             .expect("query works");
     }
 }
-

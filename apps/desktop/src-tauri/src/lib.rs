@@ -7,12 +7,18 @@ pub struct DesktopState {
 
 #[tauri::command]
 fn runtime_status(state: State<'_, DesktopState>) -> Result<RuntimeStatus, String> {
-    state.core.runtime_status().map_err(|error| error.to_string())
+    state
+        .core
+        .runtime_status()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn stop_everything(state: State<'_, DesktopState>) -> Result<usize, String> {
-    state.core.stop_everything().map_err(|error| error.to_string())
+    state
+        .core
+        .stop_everything()
+        .map_err(|error| error.to_string())
 }
 
 pub fn run() {
