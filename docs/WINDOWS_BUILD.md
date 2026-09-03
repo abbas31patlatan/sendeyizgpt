@@ -2,12 +2,13 @@
 
 The `Windows package` workflow is the release gate for Windows 10/11 x64.
 It installs locked frontend dependencies, runs TypeScript and Rust checks,
+downloads and checksum-verifies the pinned official llama.cpp Vulkan runtime,
 builds the Tauri application with the MSVC target, and rejects the run unless
-at least one installer plus the unpackaged `aegis-ai.exe` are present.
+the installers, desktop binary and isolated inference worker are present.
 
-Successful runs publish a `Aegis-AI-Windows-x64` artifact containing:
+Successful runs publish an `Aegis-AI-Windows-x64` CI artifact containing:
 
-- `aegis-ai.exe`
+- `SendeyizGPT-Windows-x64-Portable.zip` with `SendeyizGPT.exe` and the Vulkan runtime
 - the generated NSIS `.exe` installer
 - the generated MSI installer
 - `SHA256SUMS.json`

@@ -1,7 +1,14 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$targetRoot = Join-Path $projectRoot "apps\desktop\src-tauri\target\x86_64-pc-windows-msvc\release"
+$targetCandidates = @(
+    (Join-Path $projectRoot "target\x86_64-pc-windows-msvc\release"),
+    (Join-Path $projectRoot "apps\desktop\src-tauri\target\x86_64-pc-windows-msvc\release")
+)
+$targetRoot = $targetCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -First 1
+if (-not $targetRoot) {
+    throw "Windows release target directory was not created. Checked: $($targetCandidates -join ', ')"
+}
 $bundleRoot = Join-Path $targetRoot "bundle"
 $artifactRoot = Join-Path $projectRoot "artifacts\windows-x64"
 
@@ -34,18 +41,38 @@ $manifest = foreach ($installer in $installers) {
     }
 }
 
-$binary = Join-Path $targetRoot "aegis-ai.exe"
+$binary = Join-Path $targetRoot "sendeyizgpt.exe"
 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
     throw "The unpackaged desktop executable was not created: $binary"
 }
-Copy-Item -LiteralPath $binary -Destination (Join-Path $artifactRoot "aegis-ai.exe")
+$portableRoot = Join-Path $artifactRoot "SendeyizGPT-Portable"
+New-Item -ItemType Directory -Path $portableRoot | Out-Null
+Copy-Item -LiteralPath $binary -Destination (Join-Path $portableRoot "SendeyizGPT.exe")
+$runtimeSource = Join-Path $projectRoot "runtime\llama.cpp-vulkan"
+if (-not (Test-Path -LiteralPath (Join-Path $runtimeSource "llama-server.exe") -PathType Leaf)) {
+    throw "Bundled llama.cpp Vulkan runtime was not staged: $runtimeSource"
+}
+Copy-Item -LiteralPath (Join-Path $projectRoot "runtime") -Destination $portableRoot -Recurse
+$portableReadme = @"
+SendeyizGPT portable package
 
-$binaryInfo = Get-Item -LiteralPath $binary
-$binaryHash = Get-FileHash -LiteralPath $binary -Algorithm SHA256
+1. Run SendeyizGPT.exe.
+2. Open Models.
+3. Drag a GGUF model file into the window.
+4. Choose Balanced, then Load model.
+5. Open Chats and start a conversation.
+
+The model and chat database stay on this computer. The bundled inference worker binds only to 127.0.0.1.
+"@
+Set-Content -LiteralPath (Join-Path $portableRoot "README.txt") -Value $portableReadme -Encoding utf8NoBOM
+$portableArchive = Join-Path $artifactRoot "SendeyizGPT-Windows-x64-Portable.zip"
+Compress-Archive -LiteralPath (Join-Path $portableRoot "*") -DestinationPath $portableArchive -CompressionLevel Optimal
+Remove-Item -LiteralPath $portableRoot -Recurse -Force
+
 $manifest += [PSCustomObject]@{
-    File = "aegis-ai.exe"
-    SizeBytes = $binaryInfo.Length
-    Sha256 = $binaryHash.Hash.ToLowerInvariant()
+    File = "SendeyizGPT-Windows-x64-Portable.zip"
+    SizeBytes = (Get-Item -LiteralPath $portableArchive).Length
+    Sha256 = (Get-FileHash -LiteralPath $portableArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
 $manifest |
@@ -55,4 +82,3 @@ $manifest |
 
 Write-Host "Verified package contents:" -ForegroundColor Green
 $manifest | Sort-Object File | Format-Table -AutoSize
-

@@ -1,24 +1,40 @@
-# Aegis AI
+# SendeyizGPT
 
-Aegis AI is a local-first Windows AI work environment. Its core boundary is
+SendeyizGPT is a local-first Windows AI work environment. Its core boundary is
 deliberately small: models, agents, tools, providers, events, memory and
 workspaces are separate capabilities, while every computer-side effect is
 mediated by a native Permission Broker.
 
 ## Current status
 
-Milestone 0 source foundation is in place:
+The current Windows build provides a usable local-chat foundation:
 
 - Tauri 2 + React/TypeScript desktop shell
+- isolated llama.cpp server worker with a pinned Windows Vulkan x64 runtime
+- GGUF model loading with Eco, Balanced and Performance profiles
+- token-streaming local chat with SQLite conversation persistence
+- drag-and-drop model selection and an emergency stop control
 - Rust workspace with typed protocol, IPC authentication helpers, inference and agent contracts
 - Permission Broker with workspace path checks, approval records and one-time execution permits
 - SQLite migration with foreign keys, WAL and core domain tables
 - Tool manifest and untrusted-output contracts
 - Architecture, security, plugin and development documentation
 
-Inference, model scanning, browser, audio, vision and real tool execution are
-not faked in this milestone. Their extension points are present and the UI
-surfaces unavailable runtimes explicitly.
+Workspace tools, browser automation, audio, vision, scheduled providers and
+plugins remain disabled until their permission/audit implementations are
+complete. They are not represented as working features in the UI.
+
+## Start on Windows
+
+1. Extract `SendeyizGPT-Windows-x64-Portable.zip`.
+2. Run `SendeyizGPT.exe` (administrator privileges are not required).
+3. Open **Models** and drag a `.gguf` model onto the window.
+4. Choose **Balanced** and select **Load model**.
+5. Open **Chats** and send a message.
+
+The included runtime targets Vulkan and is suitable for AMD Radeon GPUs such
+as the RX 5700 XT. A model is not redistributed; the user selects a locally
+stored GGUF file whose license is independent from this application.
 
 ## Prerequisites
 
@@ -48,9 +64,6 @@ build can be run with:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
-
-The current scratch environment does not include Rust/Cargo, so the Rust
-commands are intentionally left for a Windows developer environment or CI.
 
 ## Documents
 

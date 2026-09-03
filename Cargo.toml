@@ -6,6 +6,7 @@ members = [
     "crates/database",
     "crates/inference",
     "crates/ipc",
+    "crates/llama-runtime",
     "crates/permissions",
     "crates/protocol",
     "crates/tools",
@@ -24,6 +25,7 @@ aegis-core = { path = "crates/core" }
 aegis-database = { path = "crates/database" }
 aegis-inference = { path = "crates/inference" }
 aegis-ipc = { path = "crates/ipc" }
+aegis-llama-runtime = { path = "crates/llama-runtime" }
 aegis-permissions = { path = "crates/permissions" }
 aegis-protocol = { path = "crates/protocol" }
 aegis-tools = { path = "crates/tools" }
@@ -39,7 +41,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.47", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 url = "2.5"
 uuid = { version = "1.18", features = ["serde", "v4"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
