@@ -122,7 +122,7 @@ struct PendingInvocation {
 #[derive(Debug)]
 pub enum ToolInvocation {
     Completed(ToolResult),
-    ApprovalRequired { approval: ApprovalRequest },
+    ApprovalRequired { approval: Box<ApprovalRequest> },
     Denied { reason: String },
 }
 
