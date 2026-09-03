@@ -1,0 +1,16 @@
+[package]
+name = "aegis-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aegis-agent.workspace = true
+aegis-inference.workspace = true
+aegis-permissions.workspace = true
+aegis-tools.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+

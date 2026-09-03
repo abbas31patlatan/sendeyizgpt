@@ -1,0 +1,18 @@
+[package]
+name = "aegis-permissions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aegis-protocol.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.22"

@@ -1,0 +1,45 @@
+[workspace]
+members = [
+    "apps/desktop/src-tauri",
+    "crates/agent",
+    "crates/core",
+    "crates/database",
+    "crates/inference",
+    "crates/ipc",
+    "crates/permissions",
+    "crates/protocol",
+    "crates/tools",
+    "workers/worker-host",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[workspace.dependencies]
+aegis-agent = { path = "crates/agent" }
+aegis-core = { path = "crates/core" }
+aegis-database = { path = "crates/database" }
+aegis-inference = { path = "crates/inference" }
+aegis-ipc = { path = "crates/ipc" }
+aegis-permissions = { path = "crates/permissions" }
+aegis-protocol = { path = "crates/protocol" }
+aegis-tools = { path = "crates/tools" }
+
+async-trait = "0.1"
+blake3 = "1.8"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+getrandom = "0.3"
+hmac = "0.12"
+jsonschema = { version = "0.52", default-features = false }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["serde", "v4"] }

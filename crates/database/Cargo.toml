@@ -1,0 +1,11 @@
+[package]
+name = "aegis-database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+

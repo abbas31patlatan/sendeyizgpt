@@ -1,0 +1,10 @@
+[package]
+name = "aegis-worker-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aegis-protocol.workspace = true
+serde_json.workspace = true
+

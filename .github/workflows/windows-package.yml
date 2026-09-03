@@ -1,0 +1,78 @@
+name: Windows package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "aegis-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package-windows-x64:
+    name: Build and verify Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js LTS
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Set up Rust stable MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: Cache Rust build output
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix apps/desktop
+
+      - name: Verify source
+        shell: pwsh
+        run: |
+          npm --prefix frontend run typecheck
+          npm --prefix frontend run build
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
+      - name: Build Tauri installers
+        shell: pwsh
+        run: npm --prefix apps/desktop exec -- tauri build --target x86_64-pc-windows-msvc
+
+      - name: Verify and stage installers
+        shell: pwsh
+        run: .\scripts\verify-windows-package.ps1
+
+      - name: Upload verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aegis-AI-Windows-x64
+          path: artifacts/windows-x64/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
