@@ -48,19 +48,30 @@ struct StartGenerationRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum GenerationUiEvent {
-    Started { operation_id: String },
-    Delta { operation_id: String, text: String },
+    Started {
+        operation_id: String,
+    },
+    Delta {
+        operation_id: String,
+        text: String,
+    },
     Finished {
         operation_id: String,
         message: ChatMessageRecord,
         summary: CompletionSummary,
     },
-    Failed { operation_id: String, message: String },
+    Failed {
+        operation_id: String,
+        message: String,
+    },
 }
 
 #[tauri::command]
 fn runtime_status(state: State<'_, DesktopState>) -> Result<RuntimeStatus, String> {
-    state.core.runtime_status().map_err(|error| error.to_string())
+    state
+        .core
+        .runtime_status()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -191,11 +202,7 @@ async fn start_generation(
         .ok_or_else(|| "A user message is required.".to_owned())?;
     state
         .chats
-        .append_message(
-            &request.conversation_id,
-            ChatRole::User,
-            &last_user.content,
-        )
+        .append_message(&request.conversation_id, ChatRole::User, &last_user.content)
         .map_err(|error| error.to_string())?;
 
     let (operation_id, cancellation) = state

@@ -51,7 +51,9 @@ impl ChatRole {
             "user" => Ok(Self::User),
             "assistant" => Ok(Self::Assistant),
             "tool" => Ok(Self::Tool),
-            _ => Err(DatabaseError::InvalidData(format!("unknown chat role: {value}"))),
+            _ => Err(DatabaseError::InvalidData(format!(
+                "unknown chat role: {value}"
+            ))),
         }
     }
 }
@@ -112,7 +114,10 @@ impl ChatStore {
     }
 
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>, DatabaseError> {
-        let connection = self.connection.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned)?;
         let mut statement = connection
             .prepare(
                 "SELECT id, title, pinned, created_at, updated_at
@@ -135,8 +140,14 @@ impl ChatStore {
             .map_err(DatabaseError::Query)
     }
 
-    pub fn list_messages(&self, conversation_id: &str) -> Result<Vec<ChatMessageRecord>, DatabaseError> {
-        let connection = self.connection.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+    pub fn list_messages(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ChatMessageRecord>, DatabaseError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned)?;
         let mut statement = connection
             .prepare(
                 "SELECT id, conversation_id, role, content, created_at
@@ -177,7 +188,9 @@ impl ChatStore {
         content: &str,
     ) -> Result<ChatMessageRecord, DatabaseError> {
         if content.trim().is_empty() {
-            return Err(DatabaseError::InvalidData("message content cannot be empty".to_owned()));
+            return Err(DatabaseError::InvalidData(
+                "message content cannot be empty".to_owned(),
+            ));
         }
         let now = chrono::Utc::now().to_rfc3339();
         let message = ChatMessageRecord {
@@ -187,7 +200,10 @@ impl ChatStore {
             content: content.to_owned(),
             created_at: now.clone(),
         };
-        let mut connection = self.connection.lock().map_err(|_| DatabaseError::LockPoisoned)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned)?;
         let transaction = connection.transaction().map_err(DatabaseError::Query)?;
         transaction
             .execute(
@@ -209,7 +225,11 @@ impl ChatStore {
 
 fn normalized_title(title: &str) -> String {
     let trimmed = title.trim();
-    let source = if trimmed.is_empty() { "New conversation" } else { trimmed };
+    let source = if trimmed.is_empty() {
+        "New conversation"
+    } else {
+        trimmed
+    };
     source.chars().take(80).collect()
 }
 
@@ -352,7 +372,9 @@ mod tests {
         let store = ChatStore {
             connection: Mutex::new(open_in_memory().expect("database opens")),
         };
-        let conversation = store.create_conversation("First chat").expect("conversation");
+        let conversation = store
+            .create_conversation("First chat")
+            .expect("conversation");
         store
             .append_message(&conversation.id, ChatRole::User, "Hello")
             .expect("message");

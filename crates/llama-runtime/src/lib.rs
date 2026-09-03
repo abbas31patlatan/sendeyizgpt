@@ -11,7 +11,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -119,7 +119,9 @@ impl LlamaServerRuntime {
         profile: LoadProfile,
         cancellation: CancellationToken,
     ) -> Result<RuntimeSnapshot, RuntimeError> {
-        profile.validate().map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
+        profile
+            .validate()
+            .map_err(|error| RuntimeError::InvalidConfiguration(error.to_string()))?;
         let executable = canonical_file(executable, "llama-server executable")?;
         let model = canonical_file(model, "GGUF model")?;
         if !model
@@ -276,7 +278,9 @@ impl LlamaServerRuntime {
             while let Some(newline) = pending.find('\n') {
                 let line = pending[..newline].trim().to_owned();
                 pending.drain(..=newline);
-                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
                 let data = data.trim();
                 if data == "[DONE]" {
                     continue;
@@ -287,12 +291,21 @@ impl LlamaServerRuntime {
                     .pointer("/choices/0/delta/content")
                     .and_then(serde_json::Value::as_str)
                 {
-                    if !text.is_empty() && deltas.send(ChatDelta { text: text.to_owned() }).await.is_err() {
+                    if !text.is_empty()
+                        && deltas
+                            .send(ChatDelta {
+                                text: text.to_owned(),
+                            })
+                            .await
+                            .is_err()
+                    {
                         return Err(RuntimeError::Cancelled);
                     }
                 }
                 if let Some(usage) = value.get("usage") {
-                    prompt_tokens = usage.get("prompt_tokens").and_then(serde_json::Value::as_u64);
+                    prompt_tokens = usage
+                        .get("prompt_tokens")
+                        .and_then(serde_json::Value::as_u64);
                     generated_tokens = usage
                         .get("completion_tokens")
                         .and_then(serde_json::Value::as_u64);
@@ -300,9 +313,9 @@ impl LlamaServerRuntime {
             }
         }
         let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let tokens_per_second = generated_tokens.filter(|_| elapsed_ms > 0).map(|tokens| {
-            tokens as f64 / (elapsed_ms as f64 / 1000.0)
-        });
+        let tokens_per_second = generated_tokens
+            .filter(|_| elapsed_ms > 0)
+            .map(|tokens| tokens as f64 / (elapsed_ms as f64 / 1000.0));
         self.snapshot.write().await.tokens_per_second = tokens_per_second;
         Ok(CompletionSummary {
             prompt_tokens,
@@ -364,13 +377,19 @@ fn canonical_file(path: &Path, label: &'static str) -> Result<PathBuf, RuntimeEr
 
 fn reserve_loopback_port() -> Result<u16, RuntimeError> {
     let listener = TcpListener::bind(SocketAddr::new(LOOPBACK, 0)).map_err(RuntimeError::Port)?;
-    listener.local_addr().map(|address| address.port()).map_err(RuntimeError::Port)
+    listener
+        .local_addr()
+        .map(|address| address.port())
+        .map_err(RuntimeError::Port)
 }
 
 async fn http_status_error(response: reqwest::Response) -> RuntimeError {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
-    RuntimeError::Protocol(format!("llama.cpp returned {status}: {}", body.chars().take(500).collect::<String>()))
+    RuntimeError::Protocol(format!(
+        "llama.cpp returned {status}: {}",
+        body.chars().take(500).collect::<String>()
+    ))
 }
 
 #[cfg(windows)]
@@ -408,7 +427,10 @@ pub enum RuntimeError {
     #[error("invalid runtime configuration: {0}")]
     InvalidConfiguration(String),
     #[error("{label} path is invalid: {source}")]
-    InvalidPath { label: &'static str, source: std::io::Error },
+    InvalidPath {
+        label: &'static str,
+        source: std::io::Error,
+    },
     #[error("could not reserve a loopback port: {0}")]
     Port(std::io::Error),
     #[error("could not start llama.cpp worker: {0}")]
@@ -439,7 +461,11 @@ mod tests {
         let wrong = directory.path().join("model.bin");
         std::fs::write(&wrong, b"test").expect("test file");
         assert!(canonical_file(&wrong, "model").is_ok());
-        assert!(!wrong.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("gguf")));
+        assert!(
+            !wrong
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+        );
     }
 
     #[test]
