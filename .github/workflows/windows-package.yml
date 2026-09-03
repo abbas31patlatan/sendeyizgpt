@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   group: windows-package-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   package-windows-x64:
