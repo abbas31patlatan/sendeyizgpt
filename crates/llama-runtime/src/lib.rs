@@ -44,7 +44,7 @@ pub struct CompletionSummary {
     pub tokens_per_second: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeSnapshot {
     pub running: bool,
     pub model_path: Option<PathBuf>,
@@ -55,22 +55,6 @@ pub struct RuntimeSnapshot {
     pub port: Option<u16>,
     pub tokens_per_second: Option<f64>,
     pub last_error: Option<String>,
-}
-
-impl Default for RuntimeSnapshot {
-    fn default() -> Self {
-        Self {
-            running: false,
-            model_path: None,
-            model_name: None,
-            profile: None,
-            context_length: None,
-            accelerator: None,
-            port: None,
-            tokens_per_second: None,
-            last_error: None,
-        }
-    }
 }
 
 struct WorkerState {
@@ -168,8 +152,12 @@ impl LlamaServerRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .creation_flags(no_window_flag());
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.as_std_mut().creation_flags(0x08000000);
+        }
 
         let child = command.spawn().map_err(RuntimeError::Spawn)?;
         let endpoint = format!("http://127.0.0.1:{port}");
@@ -390,36 +378,6 @@ async fn http_status_error(response: reqwest::Response) -> RuntimeError {
         "llama.cpp returned {status}: {}",
         body.chars().take(500).collect::<String>()
     ))
-}
-
-#[cfg(windows)]
-fn no_window_flag() -> u32 {
-    0x08000000
-}
-
-#[cfg(not(windows))]
-fn no_window_flag() -> u32 {
-    0
-}
-
-trait CommandCreationFlags {
-    fn creation_flags(&mut self, flags: u32) -> &mut Self;
-}
-
-#[cfg(windows)]
-impl CommandCreationFlags for Command {
-    fn creation_flags(&mut self, flags: u32) -> &mut Self {
-        use std::os::windows::process::CommandExt;
-        self.as_std_mut().creation_flags(flags);
-        self
-    }
-}
-
-#[cfg(not(windows))]
-impl CommandCreationFlags for Command {
-    fn creation_flags(&mut self, _flags: u32) -> &mut Self {
-        self
-    }
 }
 
 #[derive(Debug, Error)]
