@@ -30,25 +30,13 @@ pub enum AcceleratorKind {
     Remote,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
     pub vision: bool,
     pub tool_calling: bool,
     pub reasoning: bool,
     pub embeddings: bool,
     pub audio_input: bool,
-}
-
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            vision: false,
-            tool_calling: false,
-            reasoning: false,
-            embeddings: false,
-            audio_input: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
