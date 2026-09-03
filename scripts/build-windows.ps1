@@ -13,6 +13,26 @@ Require-Command "cargo" "Install Rust with the stable MSVC toolchain."
 Require-Command "rustup" "Install rustup from https://rustup.rs."
 Require-Command "npm" "Install the Node.js LTS release."
 
+$llamaVersion = "b10785"
+$llamaSha256 = "08cf48c8ccdb56eaa9e2aed4f08abe9ad9994edf81961aed265d195aecd835e5"
+$llamaAsset = "llama-$llamaVersion-bin-win-vulkan-x64.zip"
+$llamaArchive = Join-Path $env:TEMP $llamaAsset
+$llamaRuntime = Join-Path $projectRoot "runtime\llama.cpp-vulkan"
+Write-Host "Fetching the pinned llama.cpp Vulkan runtime..." -ForegroundColor Cyan
+Invoke-WebRequest -Uri "https://github.com/ggml-org/llama.cpp/releases/download/$llamaVersion/$llamaAsset" -OutFile $llamaArchive
+$actualLlamaHash = (Get-FileHash -LiteralPath $llamaArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualLlamaHash -ne $llamaSha256) {
+    throw "llama.cpp runtime checksum mismatch. Expected $llamaSha256, got $actualLlamaHash"
+}
+if (Test-Path -LiteralPath $llamaRuntime) {
+    Remove-Item -LiteralPath $llamaRuntime -Recurse -Force
+}
+New-Item -ItemType Directory -Path $llamaRuntime | Out-Null
+Expand-Archive -LiteralPath $llamaArchive -DestinationPath $llamaRuntime
+if (-not (Test-Path -LiteralPath (Join-Path $llamaRuntime "llama-server.exe") -PathType Leaf)) {
+    throw "The pinned runtime archive does not contain llama-server.exe"
+}
+
 Write-Host "Checking the Windows MSVC Rust target..." -ForegroundColor Cyan
 rustup default stable-msvc
 rustup target add x86_64-pc-windows-msvc

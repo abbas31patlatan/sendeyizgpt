@@ -30,25 +30,13 @@ pub enum AcceleratorKind {
     Remote,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
     pub vision: bool,
     pub tool_calling: bool,
     pub reasoning: bool,
     pub embeddings: bool,
     pub audio_input: bool,
-}
-
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            vision: false,
-            tool_calling: false,
-            reasoning: false,
-            embeddings: false,
-            audio_input: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,7 +289,10 @@ pub struct MemoryEstimate {
 }
 
 impl MemoryEstimate {
-    pub fn for_model(model: &ModelDescriptor, profile: &LoadProfile) -> Result<Self, InferenceError> {
+    pub fn for_model(
+        model: &ModelDescriptor,
+        profile: &LoadProfile,
+    ) -> Result<Self, InferenceError> {
         profile.validate()?;
         let file_bytes = model.file_size_bytes as f64;
         let weights_bytes = (file_bytes * 1.05).ceil() as u64;
@@ -326,15 +317,15 @@ impl MemoryEstimate {
                 (tokens * layers as f64 * kv_heads as f64 * head_dim * (k + v)).ceil() as u64
             }
             _ => {
-                assumptions.push("KV cache metadata is incomplete; KV estimate is omitted".to_owned());
+                assumptions
+                    .push("KV cache metadata is incomplete; KV estimate is omitted".to_owned());
                 0
             }
         };
-        let scratch_bytes = (256_u64 * 1024 * 1024)
-            .saturating_add((profile.batch_size as u64) * 1024 * 1024 / 2);
-        let gpu_weight_bytes = weights_bytes
-            .saturating_mul(profile.gpu_offload_percent as u64)
-            / 100;
+        let scratch_bytes =
+            (256_u64 * 1024 * 1024).saturating_add((profile.batch_size as u64) * 1024 * 1024 / 2);
+        let gpu_weight_bytes =
+            weights_bytes.saturating_mul(profile.gpu_offload_percent as u64) / 100;
         let cpu_weight_bytes = weights_bytes.saturating_sub(gpu_weight_bytes);
         let gpu_kv_bytes = if profile.kv_cache_offload {
             kv_cache_bytes
@@ -444,7 +435,11 @@ pub trait InferenceBackend: Send + Sync {
 
     async fn tokenize(&self, model: &LoadedModel, text: &str) -> Result<Vec<u32>, InferenceError>;
 
-    async fn detokenize(&self, model: &LoadedModel, tokens: &[u32]) -> Result<String, InferenceError>;
+    async fn detokenize(
+        &self,
+        model: &LoadedModel,
+        tokens: &[u32],
+    ) -> Result<String, InferenceError>;
 
     async fn model_info(&self, model: &LoadedModel) -> Result<ModelDescriptor, InferenceError>;
 
@@ -501,7 +496,8 @@ mod tests {
 
     #[test]
     fn profiles_validate_and_estimates_are_labeled() {
-        let estimate = MemoryEstimate::for_model(&model(), &LoadProfile::balanced()).expect("estimate");
+        let estimate =
+            MemoryEstimate::for_model(&model(), &LoadProfile::balanced()).expect("estimate");
         assert!(estimate.estimated_vram_bytes > 0);
         assert_eq!(estimate.confidence, EstimateConfidence::High);
         assert!(!estimate.assumptions.is_empty());

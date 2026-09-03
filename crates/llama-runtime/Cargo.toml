@@ -1,15 +1,13 @@
 [package]
-name = "aegis-tools"
+name = "aegis-llama-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-aegis-permissions.workspace = true
-aegis-protocol.workspace = true
-async-trait.workspace = true
-blake3.workspace = true
-jsonschema.workspace = true
+aegis-inference.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -18,5 +16,4 @@ tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
-tempfile = "3.22"
+tempfile = "3.21"

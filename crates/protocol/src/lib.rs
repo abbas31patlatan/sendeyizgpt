@@ -219,10 +219,12 @@ mod tests {
 
     #[test]
     fn rejects_major_version_mismatch() {
-        assert!(!ProtocolVersion::CURRENT.is_compatible_with(ProtocolVersion {
-            major: PROTOCOL_MAJOR + 1,
-            minor: 0,
-        }));
+        assert!(
+            !ProtocolVersion::CURRENT.is_compatible_with(ProtocolVersion {
+                major: PROTOCOL_MAJOR + 1,
+                minor: 0,
+            })
+        );
     }
 
     #[test]

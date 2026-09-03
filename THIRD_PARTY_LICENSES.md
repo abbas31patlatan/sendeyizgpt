@@ -14,7 +14,8 @@ It is intentionally kept separate from the application license decision.
 | Serde / serde_json | Typed serialization | MIT / Apache-2.0 |
 | jsonschema | Tool/plugin input validation | MIT; remote reference features disabled in the core |
 | rusqlite + SQLite | Persistence | rusqlite: MIT; SQLite: public domain |
-| llama.cpp worker | Local inference runtime | MIT; preserve upstream notices |
+| llama.cpp b10785 Windows Vulkan x64 | Isolated local inference runtime | MIT; official archive is SHA-256 pinned and its upstream notices are redistributed |
+| reqwest + rustls | Loopback-only worker client | MIT / Apache-2.0 / ISC; exact transitive notices generated at release time |
 | GGUF model files | User-provided model assets | Model-specific license; never infer from application license |
 
 ## Release requirements

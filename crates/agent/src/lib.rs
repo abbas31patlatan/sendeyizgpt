@@ -236,7 +236,9 @@ mod tests {
         .expect("valid limits");
         controller.start();
         controller.begin_step().expect("step");
-        controller.register_tool_call(b"read:README").expect("first call");
+        controller
+            .register_tool_call(b"read:README")
+            .expect("first call");
         assert!(matches!(
             controller.register_tool_call(b"read:README"),
             Err(AgentError::LoopDetected)
@@ -249,7 +251,9 @@ mod tests {
         controller.start();
         controller.cancel();
         assert!(controller.is_cancelled());
-        assert!(matches!(controller.begin_step(), Err(AgentError::Cancelled)));
+        assert!(matches!(
+            controller.begin_step(),
+            Err(AgentError::Cancelled)
+        ));
     }
 }
-

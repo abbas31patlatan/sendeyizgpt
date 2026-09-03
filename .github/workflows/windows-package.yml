@@ -16,13 +16,16 @@ permissions:
 
 concurrency:
   group: windows-package-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   package-windows-x64:
     name: Build and verify Windows x64
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      LLAMA_CPP_VERSION: b10785
+      LLAMA_CPP_VULKAN_SHA256: 08cf48c8ccdb56eaa9e2aed4f08abe9ad9994edf81961aed265d195aecd835e5
 
     steps:
       - name: Check out source
@@ -42,6 +45,27 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
+
+      - name: Fetch pinned llama.cpp Vulkan runtime
+        shell: pwsh
+        run: |
+          $asset = "llama-$env:LLAMA_CPP_VERSION-bin-win-vulkan-x64.zip"
+          $url = "https://github.com/ggml-org/llama.cpp/releases/download/$env:LLAMA_CPP_VERSION/$asset"
+          $archive = Join-Path $env:RUNNER_TEMP $asset
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:LLAMA_CPP_VULKAN_SHA256) {
+            throw "llama.cpp runtime checksum mismatch. Expected $env:LLAMA_CPP_VULKAN_SHA256, got $actual"
+          }
+          $runtime = Join-Path $env:GITHUB_WORKSPACE "runtime\llama.cpp-vulkan"
+          if (Test-Path -LiteralPath $runtime) {
+            Remove-Item -LiteralPath $runtime -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $runtime | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath $runtime
+          if (-not (Test-Path -LiteralPath (Join-Path $runtime "llama-server.exe") -PathType Leaf)) {
+            throw "Pinned runtime does not contain llama-server.exe"
+          }
 
       - name: Cache Rust build output
         uses: swatinem/rust-cache@v2
@@ -74,8 +98,8 @@ jobs:
       - name: Upload verified package
         uses: actions/upload-artifact@v4
         with:
-          name: Aegis-AI-Windows-x64
+          name: SendeyizGPT-Windows-x64
           path: artifacts/windows-x64/*
           if-no-files-found: error
-          compression-level: 0
+          compression-level: 6
           retention-days: 14
