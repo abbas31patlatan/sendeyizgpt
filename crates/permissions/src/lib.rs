@@ -126,7 +126,7 @@ pub struct CommandPreview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "target_type", rename_all = "snake_case")]
 pub enum ActionTarget {
     None,
     Path {
@@ -916,6 +916,18 @@ mod tests {
             decision,
             PermissionDecision::ApprovalRequired { .. }
         ));
+    }
+
+    #[test]
+    fn action_target_discriminator_does_not_shadow_device_kind() {
+        let value = serde_json::to_value(ActionTarget::Device {
+            kind: "microphone".to_owned(),
+            scope: "default input".to_owned(),
+        })
+        .expect("target serializes");
+
+        assert_eq!(value["target_type"], "device");
+        assert_eq!(value["kind"], "microphone");
     }
 
     #[test]
