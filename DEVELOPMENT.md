@@ -38,6 +38,21 @@ npm run typecheck
 npm run build
 ```
 
+### Local provider integration
+
+The current chat transport targets the OpenAI-compatible API surface:
+`GET /models` and `POST /chat/completions` under the configured base URL.
+Streaming uses server-sent events and accepts both regular content deltas and
+the common `reasoning_content`/ `reasoning` delta names.
+
+Provider configuration is deliberately session-oriented. Do not commit API
+keys, place them in local storage, or include them in diagnostic logs. Remote
+providers should use HTTPS; local development endpoints may use loopback HTTP.
+The provider adapter validates message count, message size, sampling values,
+base URL credentials, response framing and cancellation before a request can
+start.
+
+
 ## Windows build
 
 Use the MSVC Rust target. The application should run as a standard user. The

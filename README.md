@@ -52,6 +52,25 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 The current scratch environment does not include Rust/Cargo, so the Rust
 commands are intentionally left for a Windows developer environment or CI.
 
+## Functional local chat
+
+The M1 chat slice is now wired end to end through an OpenAI-compatible provider.
+It works with local servers such as Ollama and LM Studio, as well as compatible
+self-hosted or remote endpoints. The desktop process owns the HTTP request and
+SSE parsing; the browser UI never receives provider credentials from logs or
+local storage.
+
+1. Start a compatible server and make one model available.
+2. Run the desktop app with `npm run desktop:dev`.
+3. Open **Model library**, set the provider base URL and model, then choose
+   **Check connection**.
+4. Return to **Chats** and send a message. Responses stream incrementally and
+   can be cancelled from the composer or **Stop everything**.
+
+Default local endpoint: `http://127.0.0.1:11434/v1` (Ollama). LM Studio
+normally uses `http://127.0.0.1:1234/v1`. The optional API key is held only
+in memory for the current session and is never persisted by the frontend.
+
 ## Documents
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
