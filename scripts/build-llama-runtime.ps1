@@ -69,7 +69,7 @@ $configureArgs = @(
     "-DLLAMA_BUILD_TESTS=OFF",
     "-DLLAMA_BUILD_EXAMPLES=OFF",
     "-DLLAMA_BUILD_APP=OFF",
-    "-DLLAMA_BUILD_TOOLS=OFF",
+    "-DLLAMA_BUILD_TOOLS=ON",
     "-DLLAMA_OPENSSL=OFF"
 )
 Invoke-Native "cmake" $configureArgs
