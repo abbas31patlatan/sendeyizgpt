@@ -15,6 +15,32 @@ export const RuntimeStatusSchema = z.object({
 
 export type RuntimeStatus = z.infer<typeof RuntimeStatusSchema>;
 
+export const NativeRuntimePhaseSchema = z.enum([
+  "stopped",
+  "starting",
+  "loading",
+  "ready",
+  "stopping",
+  "error",
+]);
+
+export type NativeRuntimePhase = z.infer<typeof NativeRuntimePhaseSchema>;
+
+export const NativeRuntimeStatusSchema = z.object({
+  phase: NativeRuntimePhaseSchema,
+  modelId: z.string().nullable(),
+  modelName: z.string().nullable(),
+  executablePath: z.string().nullable(),
+  endpoint: z.string().nullable(),
+  processId: z.number().int().positive().nullable(),
+  startedAtUnixMs: z.number().int().nonnegative().nullable(),
+  contextLength: z.number().int().positive().nullable(),
+  gpuOffloadPercent: z.number().int().min(0).max(100).nullable(),
+  message: z.string().nullable(),
+});
+
+export type NativeRuntimeStatus = z.infer<typeof NativeRuntimeStatusSchema>;
+
 export const ChatRoleSchema = z.enum([
   "system",
   "developer",
@@ -268,6 +294,20 @@ export type OperationStarted = z.infer<typeof OperationStartedSchema>;
 export function parseOperationStarted(value: unknown): OperationStarted {
   return OperationStartedSchema.parse(value);
 }
+
+
+export const initialNativeRuntimeStatus: NativeRuntimeStatus = {
+  phase: "stopped",
+  modelId: null,
+  modelName: null,
+  executablePath: null,
+  endpoint: null,
+  processId: null,
+  startedAtUnixMs: null,
+  contextLength: null,
+  gpuOffloadPercent: null,
+  message: null,
+};
 
 export const initialUnavailableStatus: RuntimeStatus = {
   app_version: "—",

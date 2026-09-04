@@ -13,6 +13,7 @@ import {
   ProviderDiagnosticsSchema,
   ProviderModelSchema,
   RuntimeStatusSchema,
+  NativeRuntimeStatusSchema,
   WorkspacePathDiagnosticsSchema,
   type ChatEvent,
   type ChatRequest,
@@ -28,12 +29,34 @@ import {
   type ProviderDiagnostics,
   type ProviderModel,
   type RuntimeStatus,
+  type NativeRuntimeStatus,
   type WorkspacePathDiagnostics,
 } from "./protocol";
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   const raw = await invoke<unknown>("runtime_status");
   return RuntimeStatusSchema.parse(raw);
+}
+
+
+
+export async function getNativeRuntimeStatus(): Promise<NativeRuntimeStatus> {
+  const raw = await invoke<unknown>("native_runtime_status");
+  return NativeRuntimeStatusSchema.parse(raw);
+}
+
+export async function startNativeModel(request: {
+  modelId: string;
+  preset: LoadPreset;
+  runtimePath?: string;
+}): Promise<NativeRuntimeStatus> {
+  const raw = await invoke<unknown>("start_native_model", { request });
+  return NativeRuntimeStatusSchema.parse(raw);
+}
+
+export async function stopNativeModel(): Promise<NativeRuntimeStatus> {
+  const raw = await invoke<unknown>("stop_native_model");
+  return NativeRuntimeStatusSchema.parse(raw);
 }
 
 export async function stopEverything(): Promise<number> {
