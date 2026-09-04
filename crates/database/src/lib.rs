@@ -1333,7 +1333,11 @@ mod tests {
             metadata_json: "{}".to_owned(),
         };
         database
-            .replace_model_library_models(&library.id, std::slice::from_ref(&model), 1_700_000_000_100)
+            .replace_model_library_models(
+                &library.id,
+                std::slice::from_ref(&model),
+                1_700_000_000_100,
+            )
             .expect("model snapshot saves");
 
         let libraries = database.list_model_libraries().expect("libraries load");
