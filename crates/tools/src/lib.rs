@@ -235,7 +235,7 @@ impl ToolRuntime {
                             action,
                         },
                     );
-                Ok(ToolInvocation::ApprovalRequired { approval })
+                Ok(ToolInvocation::ApprovalRequired { approval: *approval })
             }
             PermissionDecision::Denied { reason } => Ok(ToolInvocation::Denied { reason }),
         }

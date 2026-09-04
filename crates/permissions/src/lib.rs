@@ -240,7 +240,9 @@ pub struct ApprovalRequestView {
 #[derive(Debug, Clone)]
 pub enum PermissionDecision {
     AutoApproved { permit: ExecutionPermit },
-    ApprovalRequired { approval: ApprovalRequest },
+    ApprovalRequired {
+        approval: Box<ApprovalRequest>,
+    },
     Denied { reason: String },
 }
 
@@ -381,7 +383,9 @@ impl PermissionBroker {
             },
         );
         self.record_audit(&request, AuditDecision::ApprovalRequested, None)?;
-        Ok(PermissionDecision::ApprovalRequired { approval })
+        Ok(PermissionDecision::ApprovalRequired {
+            approval: Box::new(approval),
+        })
     }
 
     pub fn approval_for_ui(&self, approval_id: Uuid) -> Option<ApprovalRequestView> {
