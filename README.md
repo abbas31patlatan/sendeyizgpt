@@ -7,18 +7,19 @@ mediated by a native Permission Broker.
 
 ## Current status
 
-Milestone 0 source foundation is in place:
+Milestone 0 foundation and the first M1 chat slice are in place:
 
 - Tauri 2 + React/TypeScript desktop shell
 - Rust workspace with typed protocol, IPC authentication helpers, inference and agent contracts
 - Permission Broker with workspace path checks, approval records and one-time execution permits
 - SQLite migration with foreign keys, WAL and core domain tables
-- Tool manifest and untrusted-output contracts
+- OpenAI-compatible provider adapter with validation, SSE streaming, cancellation and retry classification
+- Functional chat/settings UI with typed Tauri events, local conversation history and explicit unavailable surfaces
 - Architecture, security, plugin and development documentation
 
-Inference, model scanning, browser, audio, vision and real tool execution are
-not faked in this milestone. Their extension points are present and the UI
-surfaces unavailable runtimes explicitly.
+Native llama.cpp/GGUF inference, model scanning, browser, audio, vision and real
+tool execution are not yet wired. Their extension points remain explicit so the
+next milestone can add them without changing the chat/provider boundary.
 
 ## Prerequisites
 
