@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$targetRoot = Join-Path $projectRoot "apps\desktop\src-tauri\target\x86_64-pc-windows-msvc\release"
+$targetRoot = Join-Path $projectRoot "target\x86_64-pc-windows-msvc\release"
 $bundleRoot = Join-Path $targetRoot "bundle"
 $artifactRoot = Join-Path $projectRoot "artifacts\windows-x64"
 
