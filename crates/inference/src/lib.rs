@@ -462,6 +462,8 @@ pub enum InferenceError {
     IncompatibleModel(String),
     #[error("inference worker is unavailable: {0}")]
     WorkerUnavailable(String),
+    #[error("local model scan failed: {0}")]
+    ModelScan(String),
     #[error("inference operation was cancelled")]
     Cancelled,
     #[error("inference backend failed: {0}")]
