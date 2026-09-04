@@ -447,6 +447,9 @@ function App() {
   const handleStop = async () => {
     setStopMessage(null);
     try {
+      if (streamingOperation) {
+        await cancelOperation(streamingOperation);
+      }
       const count = await stopEverything();
       setStopMessage(count === 0 ? "No active operations." : count + " operation(s) cancelled.");
     } catch {

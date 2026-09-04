@@ -56,7 +56,10 @@ fn emit_chat(app: &AppHandle, event: ChatEvent) {
 
 #[tauri::command]
 fn runtime_status(state: State<'_, DesktopState>) -> Result<RuntimeStatus, String> {
-    state.core.runtime_status().map_err(|error| error.to_string())
+    state
+        .core
+        .runtime_status()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -66,8 +69,8 @@ async fn start_chat(
     request: ChatRequest,
 ) -> Result<OperationStarted, String> {
     request.validate().map_err(|error| error.to_string())?;
-    let client = OpenAiCompatibleClient::new(request.provider.clone())
-        .map_err(|error| error.to_string())?;
+    let client =
+        OpenAiCompatibleClient::new(request.provider.clone()).map_err(|error| error.to_string())?;
     let (operation_id, cancellation) = state
         .core
         .start_operation()
@@ -156,14 +159,14 @@ fn error_code(error: &ProviderError) -> &'static str {
 #[tauri::command]
 async fn list_provider_models(config: ProviderConfig) -> Result<Vec<ProviderModel>, String> {
     let client = OpenAiCompatibleClient::new(config).map_err(|error| error.to_string())?;
-    client.list_models().await.map_err(|error| error.to_string())
+    client
+        .list_models()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn cancel_operation(
-    state: State<'_, DesktopState>,
-    operation_id: String,
-) -> Result<bool, String> {
+fn cancel_operation(state: State<'_, DesktopState>, operation_id: String) -> Result<bool, String> {
     let operation_id =
         Uuid::parse_str(&operation_id).map_err(|error| format!("invalid operation id: {error}"))?;
     state
@@ -174,7 +177,10 @@ fn cancel_operation(
 
 #[tauri::command]
 fn stop_everything(state: State<'_, DesktopState>) -> Result<usize, String> {
-    state.core.stop_everything().map_err(|error| error.to_string())
+    state
+        .core
+        .stop_everything()
+        .map_err(|error| error.to_string())
 }
 
 pub fn run() {

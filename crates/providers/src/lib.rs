@@ -5,7 +5,7 @@
 //! needs to handle provider-specific wire formats.
 
 use futures_util::StreamExt;
-use reqwest::{header, Response};
+use reqwest::{Response, header};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
 use std::time::Instant;
@@ -44,18 +44,16 @@ impl Debug for ProviderConfig {
             .debug_struct("ProviderConfig")
             .field("base_url", &self.base_url)
             .field("model", &self.model)
-            .field(
-                "api_key",
-                &self.api_key.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
 
 impl ProviderConfig {
     pub fn validate(&self) -> Result<Url, ProviderError> {
-        let url = Url::parse(self.base_url.trim())
-            .map_err(|error| ProviderError::InvalidConfig(format!("base URL is invalid: {error}")))?;
+        let url = Url::parse(self.base_url.trim()).map_err(|error| {
+            ProviderError::InvalidConfig(format!("base URL is invalid: {error}"))
+        })?;
         if !matches!(url.scheme(), "http" | "https") {
             return Err(ProviderError::InvalidConfig(
                 "base URL must use http or https".to_owned(),
@@ -375,7 +373,11 @@ where
     let Some(delta) = choice.delta.as_ref() else {
         return Ok(false);
     };
-    if let Some(text) = delta.reasoning_content.as_deref().filter(|text| !text.is_empty()) {
+    if let Some(text) = delta
+        .reasoning_content
+        .as_deref()
+        .filter(|text| !text.is_empty())
+    {
         on_chunk(ChatChunk::Reasoning {
             text: text.to_owned(),
         });
@@ -531,7 +533,9 @@ impl ProviderError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Transport(_) => true,
-            Self::HttpStatus { status, .. } => *status == 408 || *status == 409 || *status == 429 || *status >= 500,
+            Self::HttpStatus { status, .. } => {
+                *status == 408 || *status == 409 || *status == 429 || *status >= 500
+            }
             _ => false,
         }
     }
@@ -582,7 +586,12 @@ mod tests {
     #[test]
     fn parses_chunked_sse_and_joins_multiline_data() {
         let mut parser = SseParser::default();
-        assert!(parser.push("data: {\"choices\":[{\"delta\":{\"content\":\"he").expect("first").is_empty());
+        assert!(
+            parser
+                .push("data: {\"choices\":[{\"delta\":{\"content\":\"he")
+                .expect("first")
+                .is_empty()
+        );
         let events = parser
             .push("llo\"}}]}\n\ndata: [DONE]\n\n")
             .expect("second");
@@ -605,11 +614,13 @@ mod tests {
 
     #[test]
     fn retryability_is_limited_to_transient_failures() {
-        assert!(ProviderError::HttpStatus {
-            status: 429,
-            body: "busy".to_owned()
-        }
-        .is_retryable());
+        assert!(
+            ProviderError::HttpStatus {
+                status: 429,
+                body: "busy".to_owned()
+            }
+            .is_retryable()
+        );
         assert!(!ProviderError::InvalidRequest("bad".to_owned()).is_retryable());
     }
 }

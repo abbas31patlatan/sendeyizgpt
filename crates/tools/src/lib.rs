@@ -323,8 +323,8 @@ fn validate_input(manifest: &ToolManifest, input: &Value) -> Result<(), ToolErro
 }
 
 fn validate_output(manifest: &ToolManifest, result: &ToolResult) -> Result<(), ToolError> {
-    let output_bytes = serde_json::to_vec(result)
-        .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+    let output_bytes =
+        serde_json::to_vec(result).map_err(|error| ToolError::InvalidInput(error.to_string()))?;
     if output_bytes.len() > manifest.limits.max_output_bytes {
         return Err(ToolError::OutputTooLarge {
             actual: output_bytes.len(),
@@ -486,7 +486,8 @@ mod tests {
 
     #[test]
     fn external_output_is_marked_and_bounded() {
-        let output = UntrustedContent::from_text("browser:https://example.test", "abcdef".to_owned(), 3);
+        let output =
+            UntrustedContent::from_text("browser:https://example.test", "abcdef".to_owned(), 3);
         assert_eq!(output.text, "abc");
         assert!(output.truncated);
         assert!(!output.content_hash.is_empty());
