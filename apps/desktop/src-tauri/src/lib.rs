@@ -4,8 +4,8 @@ use aegis_database::{
     WorkspaceRecord,
 };
 use aegis_inference::{
-    inspect_gguf_model, scan_model_directory, LoadPreset, LoadProfile, LlamaServerRuntime,
-    MemoryEstimate, ModelFormat, NativeRuntimePhase, NativeRuntimeStatus, ScannedModel,
+    LlamaServerRuntime, LoadPreset, LoadProfile, MemoryEstimate, ModelFormat, NativeRuntimePhase,
+    NativeRuntimeStatus, ScannedModel, inspect_gguf_model, scan_model_directory,
 };
 use aegis_providers::{
     ChatChunk, ChatCompletionSummary, ChatRequest, OpenAiCompatibleClient, ProviderConfig,
@@ -134,9 +134,7 @@ fn runtime_status(state: State<'_, DesktopState>) -> Result<RuntimeStatus, Strin
         .map_err(|error| error.to_string())?;
 
     match native.phase {
-        NativeRuntimePhase::Starting
-        | NativeRuntimePhase::Loading
-        | NativeRuntimePhase::Ready => {
+        NativeRuntimePhase::Starting | NativeRuntimePhase::Loading | NativeRuntimePhase::Ready => {
             status.model_name = native.model_name.clone();
             status.backend_name = Some("llama.cpp native server".to_owned());
             status.context_length = native.context_length;
@@ -420,7 +418,6 @@ fn estimate_model_load(
     })
 }
 
-
 fn default_llama_server_name() -> &'static str {
     if cfg!(windows) {
         "llama-server.exe"
@@ -434,10 +431,7 @@ fn is_bare_executable(value: &str) -> bool {
     path.components().count() == 1 && !value.contains('/') && !value.contains('\\')
 }
 
-fn resolve_llama_server_path(
-    app: &AppHandle,
-    requested: Option<&str>,
-) -> Result<PathBuf, String> {
+fn resolve_llama_server_path(app: &AppHandle, requested: Option<&str>) -> Result<PathBuf, String> {
     let executable_name = default_llama_server_name();
     if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
         if is_bare_executable(requested) {
@@ -450,9 +444,8 @@ fn resolve_llama_server_path(
                 path.display()
             ));
         }
-        return std::fs::canonicalize(path).map_err(|error| {
-            format!("llama.cpp executable could not be resolved: {error}")
-        });
+        return std::fs::canonicalize(path)
+            .map_err(|error| format!("llama.cpp executable could not be resolved: {error}"));
     }
 
     let mut candidates = Vec::new();
@@ -472,9 +465,7 @@ fn resolve_llama_server_path(
 }
 
 #[tauri::command]
-fn native_runtime_status(
-    state: State<'_, DesktopState>,
-) -> Result<NativeRuntimeStatus, String> {
+fn native_runtime_status(state: State<'_, DesktopState>) -> Result<NativeRuntimeStatus, String> {
     state
         .native_runtime
         .status()
@@ -497,8 +488,7 @@ async fn start_native_model(
         .get_model(&model_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "model does not exist; scan the library again".to_owned())?;
-    let scanned = inspect_gguf_model(&stored_model.file_path)
-        .map_err(|error| error.to_string())?;
+    let scanned = inspect_gguf_model(&stored_model.file_path).map_err(|error| error.to_string())?;
     if scanned.descriptor.id != stored_model.id
         || scanned.descriptor.file_size_bytes != stored_model.file_size_bytes
         || stored_model
@@ -507,14 +497,12 @@ async fn start_native_model(
             .is_some_and(|hash| hash != scanned.metadata_hash)
     {
         return Err(
-            "model file or metadata changed since the last scan; scan the library again"
-                .to_owned(),
+            "model file or metadata changed since the last scan; scan the library again".to_owned(),
         );
     }
 
     let profile = LoadProfile::for_preset(request.preset);
-    MemoryEstimate::for_model(&scanned.descriptor, &profile)
-        .map_err(|error| error.to_string())?;
+    MemoryEstimate::for_model(&scanned.descriptor, &profile).map_err(|error| error.to_string())?;
     let executable = resolve_llama_server_path(&app, request.runtime_path.as_deref())?;
     let runtime = Arc::clone(&state.native_runtime);
     runtime
@@ -524,9 +512,7 @@ async fn start_native_model(
 }
 
 #[tauri::command]
-fn stop_native_model(
-    state: State<'_, DesktopState>,
-) -> Result<NativeRuntimeStatus, String> {
+fn stop_native_model(state: State<'_, DesktopState>) -> Result<NativeRuntimeStatus, String> {
     state
         .native_runtime
         .stop()
