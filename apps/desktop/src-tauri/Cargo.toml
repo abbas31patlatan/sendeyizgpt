@@ -16,6 +16,7 @@ tauri-build = { version = "2.4", features = [] }
 [dependencies]
 aegis-core.workspace = true
 aegis-database.workspace = true
+aegis-inference.workspace = true
 aegis-providers.workspace = true
 serde.workspace = true
 tauri = { version = "2.8", features = [] }

@@ -1,11 +1,18 @@
 use aegis_core::{ApplicationCore, RuntimeStatus};
-use aegis_database::{ConversationRecord, Database, WorkspaceRecord};
+use aegis_inference::{
+    inspect_gguf_model, scan_model_directory, LoadPreset, LoadProfile, MemoryEstimate,
+    ModelFormat, ScannedModel,
+};
+use aegis_database::{
+    ConversationRecord, Database, ModelLibraryRecord, ModelProfileRecord, ModelRecord,
+    WorkspaceRecord,
+};
 use aegis_providers::{
     ChatChunk, ChatCompletionSummary, ChatRequest, OpenAiCompatibleClient, ProviderConfig,
     ProviderError, ProviderModel,
 };
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -74,6 +81,33 @@ struct WorkspacePathDiagnostics {
     is_directory: bool,
     canonical_path: Option<String>,
     error: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelScanIssueView {
+    path: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelScanSummary {
+    library: ModelLibraryRecord,
+    models: Vec<ModelRecord>,
+    scanned_count: usize,
+    visited_files: usize,
+    issues: Vec<ModelScanIssueView>,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelLoadEstimate {
+    model: ModelRecord,
+    profile: LoadProfile,
+    estimate: MemoryEstimate,
 }
 
 fn emit_chat(app: &AppHandle, event: ChatEvent) {
@@ -145,8 +179,7 @@ fn delete_workspace(state: State<'_, DesktopState>, workspace_id: String) -> Res
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn validate_workspace_path(path: String) -> WorkspacePathDiagnostics {
+fn validate_directory_path(path: &str) -> WorkspacePathDiagnostics {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return WorkspacePathDiagnostics {
@@ -177,6 +210,231 @@ fn validate_workspace_path(path: String) -> WorkspacePathDiagnostics {
             error: Some(error.to_string()),
         },
     }
+}
+
+#[tauri::command]
+fn validate_workspace_path(path: String) -> WorkspacePathDiagnostics {
+    validate_directory_path(&path)
+}
+
+
+#[tauri::command]
+fn load_model_libraries(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ModelLibraryRecord>, String> {
+    state
+        .database
+        .list_model_libraries()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_model_library(
+    state: State<'_, DesktopState>,
+    mut library: ModelLibraryRecord,
+) -> Result<(), String> {
+    let diagnostics = validate_directory_path(&library.root_path);
+    if !diagnostics.exists || !diagnostics.is_directory {
+        return Err(diagnostics
+            .error
+            .unwrap_or_else(|| "model library path is not a directory".to_owned()));
+    }
+    library.root_path = diagnostics
+        .canonical_path
+        .unwrap_or_else(|| library.root_path.trim().to_owned());
+    state
+        .database
+        .save_model_library(&library)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_model_library(
+    state: State<'_, DesktopState>,
+    library_id: String,
+) -> Result<bool, String> {
+    state
+        .database
+        .delete_model_library(&library_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_local_models(state: State<'_, DesktopState>) -> Result<Vec<ModelRecord>, String> {
+    state.database.list_models(None).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn scan_model_library(
+    state: State<'_, DesktopState>,
+    library_id: String,
+) -> Result<ModelScanSummary, String> {
+    let database = Arc::clone(&state.database);
+    let library = database
+        .get_model_library(&library_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "model library does not exist".to_owned())?;
+    if !library.enabled {
+        return Err("model library is disabled".to_owned());
+    }
+
+    let diagnostics = validate_directory_path(&library.root_path);
+    let canonical_path = diagnostics
+        .canonical_path
+        .filter(|_| diagnostics.exists && diagnostics.is_directory)
+        .ok_or_else(|| {
+            diagnostics
+                .error
+                .unwrap_or_else(|| "model library path is unavailable".to_owned())
+        })?;
+    let started = Instant::now();
+    let root = PathBuf::from(canonical_path);
+    let report = tauri::async_runtime::spawn_blocking(move || scan_model_directory(root))
+        .await
+        .map_err(|error| format!("model scan worker failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+    let scan_timestamp = unix_now_millis();
+    let scanned_count = report.models.len();
+    let records = report
+        .models
+        .iter()
+        .map(|model| model_record_from_scan(&library.id, model, scan_timestamp))
+        .collect::<Vec<_>>();
+    database
+        .replace_model_library_models(&library.id, &records, scan_timestamp)
+        .map_err(|error| error.to_string())?;
+
+    let library = database
+        .get_model_library(&library.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "model library disappeared during scan".to_owned())?;
+    let models = database
+        .list_models(Some(&library.id))
+        .map_err(|error| error.to_string())?;
+    let issues = report
+        .issues
+        .into_iter()
+        .map(|issue| ModelScanIssueView {
+            path: issue.path.to_string_lossy().into_owned(),
+            message: issue.message,
+        })
+        .collect();
+
+    Ok(ModelScanSummary {
+        library,
+        models,
+        scanned_count,
+        visited_files: report.visited_files,
+        issues,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+#[tauri::command]
+fn load_model_profiles(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ModelProfileRecord>, String> {
+    state
+        .database
+        .list_model_profiles()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_model_profile(
+    state: State<'_, DesktopState>,
+    profile: ModelProfileRecord,
+) -> Result<(), String> {
+    state
+        .database
+        .save_model_profile(&profile)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_model_profile(
+    state: State<'_, DesktopState>,
+    profile_id: String,
+) -> Result<bool, String> {
+    state
+        .database
+        .delete_model_profile(&profile_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn estimate_model_load(
+    state: State<'_, DesktopState>,
+    model_id: String,
+    preset: LoadPreset,
+) -> Result<ModelLoadEstimate, String> {
+    let stored_model = state
+        .database
+        .get_model(&model_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "model does not exist; scan the library again".to_owned())?;
+    let scanned = inspect_gguf_model(&stored_model.file_path).map_err(|error| error.to_string())?;
+    if scanned.descriptor.file_size_bytes != stored_model.file_size_bytes
+        || stored_model
+            .metadata_hash
+            .as_deref()
+            .is_some_and(|hash| hash != scanned.metadata_hash)
+    {
+        return Err("model file changed since the last scan; scan the library again".to_owned());
+    }
+
+    let profile = LoadProfile::for_preset(preset);
+    let estimate = MemoryEstimate::for_model(&scanned.descriptor, &profile)
+        .map_err(|error| error.to_string())?;
+    Ok(ModelLoadEstimate {
+        model: stored_model,
+        profile,
+        estimate,
+    })
+}
+
+fn model_record_from_scan(
+    library_id: &str,
+    scanned: &ScannedModel,
+    last_seen_at: i64,
+) -> ModelRecord {
+    let descriptor = &scanned.descriptor;
+    ModelRecord {
+        id: descriptor.id.clone(),
+        library_id: library_id.to_owned(),
+        display_name: descriptor.display_name.clone(),
+        file_path: descriptor.path.to_string_lossy().into_owned(),
+        format: model_format_name(descriptor.format).to_owned(),
+        family: descriptor.family.clone(),
+        parameter_count: descriptor.parameter_count,
+        architecture: descriptor.architecture.clone(),
+        quantization: descriptor.quantization.clone(),
+        gguf_version: descriptor.gguf_version.clone(),
+        file_size_bytes: descriptor.file_size_bytes,
+        context_capacity: descriptor.context_capacity,
+        vision: descriptor.capabilities.vision,
+        tool_calling: descriptor.capabilities.tool_calling,
+        reasoning: descriptor.capabilities.reasoning,
+        embeddings: descriptor.capabilities.embeddings,
+        metadata_hash: Some(scanned.metadata_hash.clone()),
+        last_seen_at,
+        metadata_json: scanned.metadata_json.clone(),
+    }
+}
+
+fn model_format_name(format: ModelFormat) -> &'static str {
+    match format {
+        ModelFormat::Gguf => "gguf",
+        ModelFormat::Safetensors => "safetensors",
+        ModelFormat::Unknown => "unknown",
+    }
+}
+
+fn unix_now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -370,6 +628,15 @@ pub fn run() {
             save_workspace,
             delete_workspace,
             validate_workspace_path,
+            load_model_libraries,
+            save_model_library,
+            delete_model_library,
+            load_local_models,
+            scan_model_library,
+            load_model_profiles,
+            save_model_profile,
+            delete_model_profile,
+            estimate_model_load,
             start_chat,
             list_provider_models,
             inspect_provider,

@@ -229,14 +229,19 @@ impl LoadProfile {
 
     pub fn validate(&self) -> Result<(), InferenceError> {
         if self.context_length == 0
+            || self.context_length > 1_048_576
             || self.cpu_threads == 0
+            || self.cpu_threads > 256
             || self.batch_size == 0
+            || self.batch_size > 65_536
             || self.physical_batch_size == 0
             || self.physical_batch_size > self.batch_size
             || self.parallel_requests == 0
+            || self.parallel_requests > 16
         {
             return Err(InferenceError::InvalidProfile(
-                "context, threads, batches and parallel requests must be positive; physical batch cannot exceed batch".to_owned(),
+                "context, threads, batches and parallel requests are outside the supported limits"
+                    .to_owned(),
             ));
         }
         if self.gpu_offload_percent > 100 {
@@ -252,6 +257,19 @@ impl LoadProfile {
             return Err(InferenceError::InvalidProfile(
                 "sampling values are outside their supported ranges".to_owned(),
             ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_model(&self, model: &ModelDescriptor) -> Result<(), InferenceError> {
+        self.validate()?;
+        if let Some(capacity) = model.context_capacity {
+            if self.context_length > capacity {
+                return Err(InferenceError::InvalidProfile(format!(
+                    "context length {} exceeds model capacity {}",
+                    self.context_length, capacity
+                )));
+            }
         }
         Ok(())
     }
@@ -293,7 +311,7 @@ impl MemoryEstimate {
         model: &ModelDescriptor,
         profile: &LoadProfile,
     ) -> Result<Self, InferenceError> {
-        profile.validate()?;
+        profile.validate_for_model(model)?;
         let file_bytes = model.file_size_bytes as f64;
         let weights_bytes = (file_bytes * 1.05).ceil() as u64;
         let mut assumptions = vec![

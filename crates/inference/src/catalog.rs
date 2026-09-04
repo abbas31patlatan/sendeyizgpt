@@ -270,7 +270,6 @@ fn descriptor_from_metadata(
         values,
         &[
             format!("{architecture_key}.attention.head_count_kv"),
-            format!("{architecture_key}.attention.head_count_kv"),
             "general.attention.head_count_kv".to_owned(),
         ],
     );
@@ -409,7 +408,7 @@ fn bits_per_weight(quantization: &str) -> Option<f32> {
         .map(|(index, _)| index + 1)?;
     let digits = upper[start..]
         .chars()
-        .take_while(char::is_ascii_digit)
+        .take_while(|character| character.is_ascii_digit())
         .collect::<String>();
     (!digits.is_empty())
         .then(|| digits.parse::<f32>().ok())
