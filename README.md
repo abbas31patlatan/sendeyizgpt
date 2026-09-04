@@ -7,7 +7,7 @@ mediated by a native Permission Broker.
 
 ## Current status
 
-Milestone 0 foundation and the first M1 chat slice are in place:
+Milestone 0 foundation, M1a local chat and the M1b persistence/workspace slice are in place:
 
 - Tauri 2 + React/TypeScript desktop shell
 - Rust workspace with typed protocol, IPC authentication helpers, inference and agent contracts
@@ -15,12 +15,18 @@ Milestone 0 foundation and the first M1 chat slice are in place:
 - SQLite migration with foreign keys, WAL and core domain tables
 - OpenAI-compatible provider adapter with validation, SSE streaming, cancellation and retry classification
 - Responsive bilingual chat/settings UI with Turkish/English copy, system/dark/light themes, searchable conversation history and explicit unavailable surfaces
-- Frame-batched streaming updates and debounced browser persistence to keep long responses responsive
+- Frame-batched streaming updates and debounced persistence to keep long responses responsive
+- SQLite-backed conversation/message repository with schema migration, reasoning preservation and cascade-safe deletion
+- Native app-data database initialization with a localStorage fallback for Vite preview/private browsing
+- Read-only workspace path validation and a durable, explicitly scoped workspace registry
+- Provider health diagnostics with measured latency, live model catalog and model-card selection
+- Per-provider system prompt, conversation rename/Markdown export and strict bilingual UX
 - Architecture, security, plugin and development documentation
 
-Native llama.cpp/GGUF inference, model scanning, browser, audio, vision and real
-tool execution are not yet wired. Their extension points remain explicit so the
-next milestone can add them without changing the chat/provider boundary.
+Native llama.cpp/GGUF inference, automatic model-library scanning, browser, audio,
+vision and real tool execution are not yet wired. Workspace registration currently
+validates and stores a path but does not grant file access; every future effect
+still needs the Permission Broker and a worker boundary.
 
 ## Prerequisites
 
@@ -72,7 +78,7 @@ local storage.
 Default local endpoint: `http://127.0.0.1:11434/v1` (Ollama). LM Studio
 normally uses `http://127.0.0.1:1234/v1`. Quick provider cards can apply
 either local endpoint. The optional API key is held only in memory for the
-current session and is never persisted by the frontend.
+current session and is never persisted by the frontend or SQLite.
 
 ## Interface and performance
 
@@ -83,9 +89,10 @@ searched with `Ctrl+K`, created with `Ctrl+N`, copied message-by-message and
 deleted with confirmation.
 
 Streaming token and reasoning events are coalesced into animation-frame updates
-before React state is changed. Conversation/settings persistence is debounced,
-which avoids serializing the full history for every incoming token while
-retaining the existing local-first behavior.
+before React state is changed. Conversation persistence is paused while a response
+is streaming and flushed after terminal events, so long responses do not rewrite
+the full SQLite history per token. The native repository uses one transaction per
+conversation snapshot and keeps browser localStorage as a preview fallback.
 
 ## Documents
 
@@ -94,3 +101,22 @@ retaining the existing local-first behavior.
 - [PLUGIN_API.md](PLUGIN_API.md)
 - [DEVELOPMENT.md](DEVELOPMENT.md)
 - [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+
+
+## Durable local state and workspaces
+
+When the Tauri shell is running, Aegis initializes `aegis.sqlite3` inside the
+current user's application-data directory and applies numbered migrations before
+registering commands. Conversations, assistant reasoning traces and named
+workspace scopes survive restarts. A Vite preview without the native bridge keeps
+the best-effort localStorage fallback so the interface remains inspectable.
+
+The **Workspaces** view performs a read-only native metadata check for an existing
+directory, canonicalizes the path where the operating system allows it, and
+stores the result as a named scope. Registration alone does not expose files to
+the model or an agent. That access will be added only with a previewable,
+Permission-Broker-mediated tool worker.
+
+The **Model library** view's connection check is an actual provider request. It
+reports route class (local/remote), round-trip latency, retryability and the
+provider's live `/models` catalog. No model card is synthetic.

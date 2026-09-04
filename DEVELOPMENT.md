@@ -9,6 +9,8 @@
 - Keep large content out of SQLite rows; use attachment/blob references.
 - Never commit model files, API keys, local databases or generated installers.
 - Do not treat demo data as production state.
+- Add a new numbered migration for schema changes; never edit an applied migration.
+- Keep provider secrets out of both SQLite and browser storage; only non-secret UI/provider preferences may use the preview fallback.
 
 ## Rust workspace
 
@@ -83,3 +85,18 @@ and support cancellation.
 5. Consume a one-time permit immediately before the effect.
 6. Emit a redacted audit event and wrap external output as untrusted content.
 
+
+
+## Durable state and workspace registry
+
+The Tauri shell opens `aegis.sqlite3` in the per-user application-data directory
+and applies migrations before commands are exposed. `aegis-database` owns typed
+repository records and transaction boundaries. Conversation snapshots preserve
+message reasoning and delete through foreign-key cascade. The frontend pauses
+native conversation writes while streaming and flushes after a terminal event.
+
+The workspace registry intentionally stops at read-only metadata validation:
+`validate_workspace_path` checks existence, directory shape and canonical path
+without reading project contents or granting an agent access. When a tool worker is
+introduced, it must consume a Permission Broker permit bound to the registered
+scope and revalidate it immediately before any effect.

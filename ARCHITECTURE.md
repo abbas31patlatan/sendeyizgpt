@@ -1,6 +1,6 @@
 # Aegis AI architecture
 
-Status: Milestone 1a local-provider chat slice, version `0.1.0`.
+Status: Milestone 1b persistence/workspace slice, version `0.1.0`.
 
 ## A. Product definition
 
@@ -24,8 +24,10 @@ The product has four non-negotiable properties:
 
 The initial release deliberately does not pretend to implement computer
 control, browser interaction, microphone capture, screen capture, MCP
-execution or a working model backend. Those capabilities are introduced only
-when their worker, policy, preview, audit and test boundaries exist.
+execution, automatic model scanning or a native inference backend. The current
+workspace registry can validate and store a directory scope, but it does not
+read project files. Effectful capabilities are introduced only when their
+worker, policy, preview, audit and test boundaries exist.
 
 ## B. Technology decisions
 
@@ -36,7 +38,7 @@ when their worker, policy, preview, audit and test boundaries exist.
 | Frontend | React + TypeScript + Vite | Fast iteration for a dense desktop UI, strict types, controlled rendering and a mature WebView ecosystem. |
 | Runtime validation | Zod at the frontend boundary; Serde in Rust | JSON crossing a process or WebView boundary is untrusted input even when the producer is our own code. |
 | Async | Tokio + tokio-util cancellation tokens | Structured asynchronous workers, bounded channels and uniform cancellation. |
-| Persistence | SQLite via `rusqlite` with bundled SQLite | One user, local-first workload; no server dependency. Foreign keys are enabled per connection and WAL is used for responsive reads/writes. See SQLite's [foreign key](https://www.sqlite.org/foreignkeys.html) and [WAL](https://www.sqlite.org/wal.html) documentation. |
+| Persistence | SQLite via `rusqlite` with bundled SQLite | One user, local-first workload; no server dependency. Foreign keys are enabled per connection and WAL is used for responsive reads/writes. The Tauri shell opens `aegis.sqlite3` in the current user's app-data directory; numbered migrations and repository transactions own durable conversations/workspace scopes. See SQLite's [foreign key](https://www.sqlite.org/foreignkeys.html) and [WAL](https://www.sqlite.org/wal.html) documentation. |
 | Secrets | Windows Credential Manager/DPAPI adapter | Secrets never live in JSON, SQLite, logs, model prompts or diagnostic bundles. A platform-neutral trait keeps the core testable. |
 | Local inference | Supervised llama.cpp worker, first format GGUF | llama.cpp is a C/C++ runtime with GGUF-oriented model tooling, Vulkan, CPU+GPU hybrid inference and multiple accelerator backends. See the [upstream repository](https://github.com/ggml-org/llama.cpp). The C/C++ boundary stays outside the desktop process. |
 | AMD path | Vulkan first | It is the first-class Windows path for the RX 5700 XT target without making ROCm a hard prerequisite. Vulkan capability and driver behavior are detected, not assumed. |
@@ -153,6 +155,24 @@ sequenceDiagram
 The context builder places tool/browser/document output in a distinct untrusted
 content envelope. It cannot become a system or developer message merely by
 containing text such as “ignore previous instructions”.
+
+## F. M1b persistence and workspace registry
+
+The native shell creates the database before registering Tauri commands. The
+repository layer exposes typed `ConversationRecord`, `MessageRecord` and
+`WorkspaceRecord` values; it never accepts provider secrets. Conversation saves
+are transactional snapshots: the conversation row and its message rows commit
+together, while message reasoning is stored as a first-class nullable column.
+Foreign keys keep message deletion coupled to its conversation.
+
+Workspace registration is intentionally narrower than workspace access. The shell
+may perform a read-only `metadata`/canonicalization check on a user-supplied
+directory and store the resulting named scope. No file is opened, copied or
+executed by this feature. Future tools must bind an action to a registered scope,
+request a broker permit and revalidate the path immediately before execution.
+
+The frontend validates every native response with Zod and falls back to
+localStorage only when the Tauri bridge is unavailable in development preview.
 
 ## F. Inference architecture
 
