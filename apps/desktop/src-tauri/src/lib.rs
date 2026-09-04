@@ -76,6 +76,7 @@ async fn start_chat(
         .start_operation()
         .map_err(|error| error.to_string())?;
     let operation_id_text = operation_id.to_string();
+    let operation_id_for_task = operation_id_text.clone();
     let core = Arc::clone(&state.core);
     let app_for_task = app.clone();
 
@@ -83,10 +84,10 @@ async fn start_chat(
         emit_chat(
             &app_for_task,
             ChatEvent::Started {
-                operation_id: operation_id_text.clone(),
+                operation_id: operation_id_for_task.clone(),
             },
         );
-        let operation_for_events = operation_id_text.clone();
+        let operation_for_events = operation_id_for_task.clone();
         let app_for_chunks = app_for_task.clone();
         let result = client
             .stream_chat(request, cancellation, move |chunk| {
@@ -107,18 +108,18 @@ async fn start_chat(
         match result {
             Ok(summary) => emit_chat(
                 &app_for_task,
-                finished_event(operation_id_text.clone(), summary),
+                finished_event(operation_id_for_task.clone(), summary),
             ),
             Err(ProviderError::Cancelled) => emit_chat(
                 &app_for_task,
                 ChatEvent::Cancelled {
-                    operation_id: operation_id_text.clone(),
+                    operation_id: operation_id_for_task.clone(),
                 },
             ),
             Err(error) => emit_chat(
                 &app_for_task,
                 ChatEvent::Failed {
-                    operation_id: operation_id_text.clone(),
+                    operation_id: operation_id_for_task.clone(),
                     code: error_code(&error).to_owned(),
                     message: error.to_string(),
                     retryable: error.is_retryable(),
