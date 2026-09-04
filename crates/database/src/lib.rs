@@ -96,6 +96,8 @@ pub struct ModelProfileRecord {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AutomationRecord {
     pub id: String,
     pub name: String,
@@ -922,7 +924,9 @@ fn automation_from_row(row: AutomationSqlRow) -> Result<AutomationRecord, Databa
         name,
         prompt,
         interval_minutes: u32::try_from(interval_minutes).map_err(|_| {
-            DatabaseError::InvalidData("automation interval is outside the supported range".to_owned())
+            DatabaseError::InvalidData(
+                "automation interval is outside the supported range".to_owned(),
+            )
         })?,
         enabled: bool_from_sql(enabled, "automation enabled")?,
         last_run_at: optional_timestamp(last_run_at)?,
@@ -1617,13 +1621,17 @@ mod tests {
             database.list_automations().expect("automations load"),
             vec![automation]
         );
-        assert!(database
-            .delete_automation("automation-1")
-            .expect("automation deletes"));
-        assert!(database
-            .list_automations()
-            .expect("automations reload")
-            .is_empty());
+        assert!(
+            database
+                .delete_automation("automation-1")
+                .expect("automation deletes")
+        );
+        assert!(
+            database
+                .list_automations()
+                .expect("automations reload")
+                .is_empty()
+        );
     }
 
 }

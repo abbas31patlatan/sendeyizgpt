@@ -2913,18 +2913,6 @@ function App() {
     </div>
   );
 
-    <section className="empty-view roadmap-view">
-      <div className="empty-view-icon" aria-hidden="true">
-        {navigation.find((item) => item.id === view)?.glyph}
-      </div>
-      <div className="eyebrow">{tx("designedNotFaked")}</div>
-      <h2>{viewTitle}</h2>
-      <p>{tx("roadmapDescription")}</p>
-      <button className="secondary-button" type="button" onClick={() => setView("chats")}>
-        {tx("returnToChat")}
-      </button>
-    </section>
-  );
 
   return (
     <div className="app-shell">
