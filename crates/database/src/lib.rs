@@ -46,7 +46,6 @@ pub struct WorkspaceRecord {
     pub updated_at: i64,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelLibraryRecord {
@@ -751,7 +750,6 @@ fn read_messages(
     .collect()
 }
 
-
 type ModelSqlRow = (
     String,
     String,
@@ -1296,7 +1294,6 @@ mod tests {
                 .is_empty()
         );
     }
-
 
     #[test]
     fn model_library_repository_round_trips_and_replaces_snapshot() {

@@ -6,7 +6,7 @@
 pub mod catalog;
 
 pub use catalog::{
-    inspect_gguf_model, scan_model_directory, ModelScanIssue, ModelScanReport, ScannedModel,
+    ModelScanIssue, ModelScanReport, ScannedModel, inspect_gguf_model, scan_model_directory,
 };
 
 use async_trait::async_trait;

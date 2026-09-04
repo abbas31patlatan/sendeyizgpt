@@ -357,9 +357,12 @@ fn metadata_string(values: &BTreeMap<String, Value>, key: &str) -> Option<String
 
 fn metadata_u64(values: &BTreeMap<String, Value>, key: &str) -> Option<u64> {
     values.get(key).and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().filter(|value| *value >= 0).map(|value| value as u64))
+        value.as_u64().or_else(|| {
+            value
+                .as_i64()
+                .filter(|value| *value >= 0)
+                .map(|value| value as u64)
+        })
     })
 }
 
@@ -509,9 +512,12 @@ impl<R: Read> LimitedReader<R> {
                 MAX_METADATA_STRING_BYTES
             )));
         }
-        let mut buffer = vec![0_u8; usize::try_from(length).map_err(|_| {
-            ScanError::Limit("metadata string length does not fit in memory".to_owned())
-        })?];
+        let mut buffer = vec![
+            0_u8;
+            usize::try_from(length).map_err(|_| {
+                ScanError::Limit("metadata string length does not fit in memory".to_owned())
+            })?
+        ];
         self.read_exact(&mut buffer)?;
         String::from_utf8(buffer)
             .map_err(|_| ScanError::Invalid("metadata string is not valid UTF-8".to_owned()))

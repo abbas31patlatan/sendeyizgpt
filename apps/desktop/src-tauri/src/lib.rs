@@ -216,7 +216,6 @@ fn validate_workspace_path(path: String) -> WorkspacePathDiagnostics {
     validate_directory_path(&path)
 }
 
-
 #[tauri::command]
 fn load_model_libraries(state: State<'_, DesktopState>) -> Result<Vec<ModelLibraryRecord>, String> {
     state

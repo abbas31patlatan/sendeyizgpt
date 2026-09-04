@@ -1977,7 +1977,7 @@ function App() {
             </div>
           )}
         </section>
-      
+      )}
     </div>
   );
   const renderRoadmap = () => (
