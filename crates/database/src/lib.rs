@@ -113,6 +113,7 @@ pub enum DatabaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
 
     #[test]
     fn creates_schema_and_enables_foreign_keys() {
