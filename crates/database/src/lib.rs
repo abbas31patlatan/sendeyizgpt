@@ -826,7 +826,6 @@ impl Database {
             .map_err(DatabaseError::Repository)?;
         Ok(deleted > 0)
     }
-
 }
 
 fn read_messages(
@@ -1633,5 +1632,4 @@ mod tests {
                 .is_empty()
         );
     }
-
 }
