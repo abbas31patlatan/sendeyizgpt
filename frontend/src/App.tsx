@@ -9,15 +9,23 @@ import {
 } from "react";
 import {
   cancelOperation,
+  deleteModelLibrary,
   deletePersistedConversation,
   deletePersistedWorkspace,
+  estimateModelLoad,
   getRuntimeStatus,
   inspectProvider,
   listenChatEvents,
+  loadLocalModels,
+  loadModelLibraries,
+  loadModelProfiles,
   loadPersistedConversations,
   loadPersistedWorkspaces,
+  saveModelLibrary,
+  saveModelProfile,
   savePersistedConversation,
   savePersistedWorkspace,
+  scanModelLibrary,
   startChat,
   stopEverything,
   validateWorkspacePath,
@@ -26,6 +34,12 @@ import {
   formatBytes,
   initialUnavailableStatus,
   type ChatEvent,
+  type LoadPreset,
+  type LocalModel,
+  type ModelLibrary,
+  type ModelLoadEstimate,
+  type ModelProfile,
+  type ModelScanSummary,
   type ChatMessage,
   type PersistedConversation,
   type PersistedWorkspace,
@@ -276,6 +290,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function formatParameterCount(value: number | null, localeTag: string): string {
+  if (value === null) {
+    return "—";
+  }
+  if (value >= 1_000_000_000_000) {
+    return (value / 1_000_000_000_000).toFixed(1) + "T";
+  }
+  if (value >= 1_000_000_000) {
+    return (value / 1_000_000_000).toFixed(1) + "B";
+  }
+  if (value >= 1_000_000) {
+    return (value / 1_000_000).toFixed(1) + "M";
+  }
+  return value.toLocaleString(localeTag);
+}
+
 function updateStoredMessage(
   conversation: Conversation,
   messageId: string,
@@ -307,6 +337,20 @@ function App() {
     useState<WorkspacePathDiagnostics | null>(null);
   const [workspaceMessage, setWorkspaceMessage] = useState<string | null>(null);
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [modelLibraries, setModelLibraries] = useState<ModelLibrary[]>([]);
+  const [localModels, setLocalModels] = useState<LocalModel[]>([]);
+  const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
+  const [modelLibraryName, setModelLibraryName] = useState("");
+  const [modelLibraryPath, setModelLibraryPath] = useState("");
+  const [modelLibraryDiagnostics, setModelLibraryDiagnostics] =
+    useState<WorkspacePathDiagnostics | null>(null);
+  const [modelLibraryMessage, setModelLibraryMessage] = useState<string | null>(null);
+  const [modelLibraryBusy, setModelLibraryBusy] = useState(false);
+  const [modelScanSummary, setModelScanSummary] = useState<ModelScanSummary | null>(null);
+  const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(null);
+  const [loadPreset, setLoadPreset] = useState<LoadPreset>("balanced");
+  const [loadEstimate, setLoadEstimate] = useState<ModelLoadEstimate | null>(null);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [persistenceHydrated, setPersistenceHydrated] = useState(false);
   const [workspacesHydrated, setWorkspacesHydrated] = useState(false);
   const [draft, setDraft] = useState("");
@@ -353,6 +397,11 @@ function App() {
   const selectedProviderModel = useMemo(
     () => modelOptions.find((model) => model.id === settings.model.trim()) ?? null,
     [modelOptions, settings.model],
+  );
+
+  const selectedLocalModel = useMemo(
+    () => localModels.find((model) => model.id === selectedLocalModelId) ?? null,
+    [localModels, selectedLocalModelId],
   );
 
   const refreshRuntime = useCallback(async () => {
@@ -585,6 +634,50 @@ function App() {
       disposed = true;
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void Promise.all([loadModelLibraries(), loadLocalModels(), loadModelProfiles()])
+      .then(([libraries, models, profiles]) => {
+        if (disposed) {
+          return;
+        }
+        setModelLibraries(libraries);
+        setLocalModels(models);
+        setModelProfiles(profiles);
+        setSelectedLocalModelId((current) => current ?? models[0]?.id ?? null);
+      })
+      .catch(() => {
+        // The native model catalog is intentionally unavailable in Vite preview.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedLocalModelId) {
+      setLoadEstimate(null);
+      return;
+    }
+    let disposed = false;
+    setProfileMessage(null);
+    void estimateModelLoad(selectedLocalModelId, loadPreset)
+      .then((estimate) => {
+        if (!disposed) {
+          setLoadEstimate(estimate);
+        }
+      })
+      .catch((estimateError) => {
+        if (!disposed) {
+          setLoadEstimate(null);
+          setProfileMessage(errorMessage(estimateError));
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [loadPreset, selectedLocalModelId]);
 
   useEffect(() => {
     const persistenceTimer = window.setTimeout(() => {
@@ -849,6 +942,149 @@ function App() {
       setConnectionMessage(errorMessage(connectionError));
     } finally {
       setModelsLoading(false);
+    }
+  };
+
+  const applyModelScan = (summary: ModelScanSummary) => {
+    setModelLibraries((current) => [
+      summary.library,
+      ...current.filter((library) => library.id !== summary.library.id),
+    ]);
+    setLocalModels((current) => [
+      ...current.filter((model) => model.libraryId !== summary.library.id),
+      ...summary.models,
+    ]);
+    setModelScanSummary(summary);
+    setSelectedLocalModelId((current) =>
+      current && summary.models.some((model) => model.id === current)
+        ? current
+        : summary.models[0]?.id ?? null,
+    );
+  };
+
+  const handleRegisterModelLibrary = async () => {
+    const path = modelLibraryPath.trim();
+    if (!path) {
+      setModelLibraryMessage(tx("modelLibraryPathRequired"));
+      return;
+    }
+    setModelLibraryBusy(true);
+    setModelLibraryMessage(null);
+    try {
+      const diagnostics = await validateWorkspacePath(path);
+      setModelLibraryDiagnostics(diagnostics);
+      if (!diagnostics.exists || !diagnostics.isDirectory) {
+        setModelLibraryMessage(tx("modelLibraryPathInvalid"));
+        return;
+      }
+      const canonicalPath = diagnostics.canonicalPath ?? path;
+      const pathParts = canonicalPath.split(/[\\/]/).filter(Boolean);
+      const fallbackName = pathParts[pathParts.length - 1] ?? tx("modelLibraryDefaultName");
+      const now = Date.now();
+      const library: ModelLibrary = {
+        id: createId("model-library"),
+        name: (modelLibraryName.trim() || fallbackName).slice(0, 128),
+        rootPath: canonicalPath,
+        enabled: true,
+        lastScanAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await saveModelLibrary(library);
+      setModelLibraries((current) => [library, ...current]);
+      setModelLibraryName("");
+      setModelLibraryPath("");
+      const summary = await scanModelLibrary(library.id);
+      applyModelScan(summary);
+      setModelLibraryDiagnostics(null);
+      setModelLibraryMessage(
+        tx("modelScanComplete", {
+          count: summary.scannedCount,
+          duration: summary.durationMs,
+        }) + (summary.issues.length > 0
+          ? " " + tx("modelScanIssues", { count: summary.issues.length })
+          : ""),
+      );
+    } catch (scanError) {
+      setModelLibraryMessage(errorMessage(scanError));
+    } finally {
+      setModelLibraryBusy(false);
+    }
+  };
+
+  const handleScanModelLibrary = async (libraryId: string) => {
+    setModelLibraryBusy(true);
+    setModelLibraryMessage(null);
+    try {
+      const summary = await scanModelLibrary(libraryId);
+      applyModelScan(summary);
+      setModelLibraryMessage(
+        tx("modelScanComplete", {
+          count: summary.scannedCount,
+          duration: summary.durationMs,
+        }) + (summary.issues.length > 0
+          ? " " + tx("modelScanIssues", { count: summary.issues.length })
+          : ""),
+      );
+    } catch (scanError) {
+      setModelLibraryMessage(errorMessage(scanError));
+    } finally {
+      setModelLibraryBusy(false);
+    }
+  };
+
+  const handleDeleteModelLibrary = async (library: ModelLibrary) => {
+    if (!window.confirm(tx("deleteModelLibraryConfirm"))) {
+      return;
+    }
+    setModelLibraryBusy(true);
+    try {
+      await deleteModelLibrary(library.id);
+      setModelLibraries((current) => current.filter((item) => item.id !== library.id));
+      setLocalModels((current) => current.filter((model) => model.libraryId !== library.id));
+      setSelectedLocalModelId((current) => {
+        const removed = localModels.find(
+          (model) => model.id === current && model.libraryId === library.id,
+        );
+        return removed ? null : current;
+      });
+      if (modelScanSummary?.library.id === library.id) {
+        setModelScanSummary(null);
+      }
+    } catch (deleteError) {
+      setModelLibraryMessage(errorMessage(deleteError));
+    } finally {
+      setModelLibraryBusy(false);
+    }
+  };
+
+  const handleSaveModelProfile = async () => {
+    if (!selectedLocalModel || !loadEstimate) {
+      return;
+    }
+    const existing = modelProfiles.find(
+      (profile) =>
+        profile.modelId === selectedLocalModel.id && profile.preset === loadPreset,
+    );
+    const now = Date.now();
+    const profile: ModelProfile = {
+      id: existing?.id ?? createId("model-profile"),
+      name: selectedLocalModel.displayName + " · " + loadPreset,
+      preset: loadPreset,
+      modelId: selectedLocalModel.id,
+      configJson: JSON.stringify(loadEstimate.profile),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    try {
+      await saveModelProfile(profile);
+      setModelProfiles((current) => [
+        profile,
+        ...current.filter((item) => item.id !== profile.id),
+      ]);
+      setProfileMessage(tx("profileSaved"));
+    } catch (saveError) {
+      setProfileMessage(errorMessage(saveError));
     }
   };
 
@@ -1438,6 +1674,310 @@ function App() {
           </div>
         )}
       </section>
+
+      <section className="model-library card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">{tx("localModelLibrary")}</div>
+            <h2>{tx("discoverLocalModels")}</h2>
+          </div>
+          <span className="pill pill-blue">{tx("metadataOnly")}</span>
+        </div>
+        <p className="settings-intro">{tx("modelLibraryIntro")}</p>
+        <div className="settings-grid">
+          <label>
+            <span>{tx("modelLibraryName")}</span>
+            <input
+              value={modelLibraryName}
+              onChange={(event) => setModelLibraryName(event.target.value)}
+              placeholder={tx("modelLibraryNamePlaceholder")}
+              maxLength={128}
+            />
+          </label>
+          <label>
+            <span>{tx("modelLibraryPath")}</span>
+            <input
+              value={modelLibraryPath}
+              onChange={(event) => {
+                setModelLibraryPath(event.target.value);
+                setModelLibraryDiagnostics(null);
+                setModelLibraryMessage(null);
+              }}
+              placeholder={tx("modelLibraryPathPlaceholder")}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+        </div>
+        <div className="settings-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => void (async () => {
+              if (!modelLibraryPath.trim()) {
+                setModelLibraryMessage(tx("modelLibraryPathRequired"));
+                return;
+              }
+              try {
+                const diagnostics = await validateWorkspacePath(modelLibraryPath.trim());
+                setModelLibraryDiagnostics(diagnostics);
+                setModelLibraryMessage(
+                  diagnostics.exists && diagnostics.isDirectory
+                    ? tx("directoryReady")
+                    : tx("modelLibraryPathInvalid"),
+                );
+              } catch (diagnosticError) {
+                setModelLibraryMessage(errorMessage(diagnosticError));
+              }
+            })()}
+            disabled={modelLibraryBusy || !modelLibraryPath.trim()}
+          >
+            {tx("validatePath")}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void handleRegisterModelLibrary()}
+            disabled={modelLibraryBusy || !modelLibraryPath.trim()}
+          >
+            {modelLibraryBusy ? tx("scanning") : tx("registerAndScan")}
+          </button>
+          {modelLibraryMessage && (
+            <span className="connection-message" role="status">{modelLibraryMessage}</span>
+          )}
+        </div>
+        {modelLibraryDiagnostics && (
+          <div
+            className={
+              "path-diagnostics " +
+              (modelLibraryDiagnostics.exists && modelLibraryDiagnostics.isDirectory
+                ? "is-valid"
+                : "is-invalid")
+            }
+          >
+            <span className="status-dot" />
+            <div>
+              <strong>
+                {modelLibraryDiagnostics.exists && modelLibraryDiagnostics.isDirectory
+                  ? tx("directoryReady")
+                  : tx("directoryUnavailable")}
+              </strong>
+              <small>
+                {modelLibraryDiagnostics.canonicalPath ??
+                  modelLibraryDiagnostics.error ??
+                  tx("directoryUnavailable")}
+              </small>
+            </div>
+          </div>
+        )}
+        <div className="provider-help">
+          <strong>{tx("scannerSafetyTitle")}</strong>
+          <span>{tx("scannerSafetyDescription")}</span>
+        </div>
+      </section>
+
+      <section className="card model-library-list-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("registeredModelLibraries")}</span>
+            <small className="card-caption">
+              {tx("modelLibraryCount", { count: modelLibraries.length })}
+            </small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("storedLocally")}</span>
+        </div>
+        {modelLibraries.length === 0 ? (
+          <div className="catalog-empty">
+            <strong>{tx("noModelLibraries")}</strong>
+            <p>{tx("noModelLibrariesDescription")}</p>
+          </div>
+        ) : (
+          <div className="model-library-list">
+            {modelLibraries.map((library) => (
+              <article className="model-library-row" key={library.id}>
+                <div className="workspace-row-icon" aria-hidden="true">◈</div>
+                <div className="workspace-row-copy">
+                  <strong>{library.name}</strong>
+                  <code>{library.rootPath}</code>
+                  <small>
+                    {library.lastScanAt
+                      ? tx("lastScanned", {
+                          date: new Date(library.lastScanAt).toLocaleString(localeTag),
+                        })
+                      : tx("neverScanned")}
+                  </small>
+                </div>
+                <div className="model-library-row-actions">
+                  <button
+                    className="secondary-button compact-button"
+                    type="button"
+                    onClick={() => void handleScanModelLibrary(library.id)}
+                    disabled={modelLibraryBusy}
+                  >
+                    {tx("scanLibrary")}
+                  </button>
+                  <button
+                    className="conversation-delete"
+                    type="button"
+                    onClick={() => void handleDeleteModelLibrary(library)}
+                    disabled={modelLibraryBusy}
+                    aria-label={tx("deleteModelLibrary")}
+                    title={tx("deleteModelLibrary")}
+                  >
+                    ×
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="card local-inventory-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("localModelInventory")}</span>
+            <small className="card-caption">
+              {tx("localModelCount", { count: localModels.length })}
+              {modelScanSummary
+                ? " · " + tx("visitedFiles", { count: modelScanSummary.visitedFiles })
+                : ""}
+            </small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("metadataOnly")}</span>
+        </div>
+        {localModels.length === 0 ? (
+          <div className="catalog-empty">
+            <strong>{tx("noLocalModels")}</strong>
+            <p>{tx("noLocalModelsDescription")}</p>
+          </div>
+        ) : (
+          <div className="local-model-grid">
+            {localModels.map((model) => (
+              <article
+                className={"local-model-card " + (selectedLocalModelId === model.id ? "is-selected" : "")}
+                key={model.id}
+              >
+                <button
+                  className="local-model-select"
+                  type="button"
+                  onClick={() => {
+                    setSelectedLocalModelId(model.id);
+                    setLoadEstimate(null);
+                    setProfileMessage(null);
+                  }}
+                >
+                  <span className="model-catalog-icon" aria-hidden="true">◈</span>
+                  <span className="local-model-title">
+                    <strong>{model.displayName}</strong>
+                    <small>{model.quantization ?? model.format.toUpperCase()}</small>
+                  </span>
+                  {selectedLocalModelId === model.id && (
+                    <span className="model-selected-mark">✓</span>
+                  )}
+                </button>
+                <div className="local-model-stats">
+                  <span>{tx("modelParameters", {
+                    count: model.parameterCount === null
+                      ? tx("unknownValue")
+                      : formatParameterCount(model.parameterCount, localeTag),
+                  })}</span>
+                  <span>{formatBytes(model.fileSizeBytes)}</span>
+                  <span>{model.architecture ?? "—"}</span>
+                  <span>
+                    {model.contextCapacity
+                      ? tx("modelContextValue", { count: model.contextCapacity })
+                      : tx("unknownValue")}
+                  </span>
+                </div>
+                <code className="local-model-path">{model.filePath}</code>
+                <div className="capability-row">
+                  {model.vision && <span>{tx("capabilityVision")}</span>}
+                  {model.toolCalling && <span>{tx("capabilityTools")}</span>}
+                  {model.reasoning && <span>{tx("capabilityReasoning")}</span>}
+                  {model.embeddings && <span>{tx("capabilityEmbeddings")}</span>}
+                  {!model.vision && !model.toolCalling && !model.reasoning && !model.embeddings && (
+                    <span className="muted">{tx("noCapabilities")}</span>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        {modelScanSummary && modelScanSummary.issues.length > 0 && (
+          <details className="model-scan-issues">
+            <summary>
+              {tx("modelScanIssues", { count: modelScanSummary.issues.length })}
+            </summary>
+            <ul>
+              {modelScanSummary.issues.slice(0, 12).map((issue) => (
+                <li key={issue.path + issue.message}>
+                  <code>{issue.path}</code>
+                  <span>{issue.message}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </section>
+
+      {selectedLocalModel && (
+        <section className="card load-profile-card">
+          <div className="card-heading">
+            <div>
+              <span className="card-title">{tx("loadProfile")}</span>
+              <small className="card-caption">{selectedLocalModel.displayName}</small>
+            </div>
+            <span className="pill pill-blue">{tx("preflightValidated")}</span>
+          </div>
+          <p className="settings-intro">{tx("loadProfileDescription")}</p>
+          <div className="profile-controls">
+            <label>
+              <span>{tx("profilePreset")}</span>
+              <select
+                value={loadPreset}
+                onChange={(event) => {
+                  setLoadPreset(event.target.value as LoadPreset);
+                  setProfileMessage(null);
+                }}
+              >
+                <option value="eco">{tx("profileEco")}</option>
+                <option value="balanced">{tx("profileBalanced")}</option>
+                <option value="performance">{tx("profilePerformance")}</option>
+              </select>
+            </label>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleSaveModelProfile()}
+              disabled={!loadEstimate}
+            >
+              {tx("saveProfile")}
+            </button>
+            {profileMessage && <span className="connection-message" role="status">{profileMessage}</span>}
+          </div>
+          {loadEstimate ? (
+            <>
+              <div className="estimate-stat-grid">
+                <div><strong>{formatBytes(loadEstimate.estimate.weights_bytes)}</strong><span>{tx("estimateWeights")}</span></div>
+                <div><strong>{formatBytes(loadEstimate.estimate.kv_cache_bytes)}</strong><span>{tx("estimateKvCache")}</span></div>
+                <div><strong>{formatBytes(loadEstimate.estimate.estimated_vram_bytes)}</strong><span>{tx("estimateVram")}</span></div>
+                <div><strong>{formatBytes(loadEstimate.estimate.estimated_ram_bytes)}</strong><span>{tx("estimateRam")}</span></div>
+              </div>
+              <div className="estimate-assumptions">
+                <strong>{tx("estimateConfidence")}: {loadEstimate.estimate.confidence.toUpperCase()}</strong>
+                <ul>
+                  {loadEstimate.estimate.assumptions.map((assumption) => <li key={assumption}>{assumption}</li>)}
+                </ul>
+              </div>
+            </>
+          ) : (
+            <div className="catalog-empty">
+              {profileMessage ?? tx("estimateLoading")}
+            </div>
+          )}
+        </section>
+      
     </div>
   );
   const renderRoadmap = () => (

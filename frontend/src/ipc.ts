@@ -4,6 +4,11 @@ import {
   ChatEventSchema,
   parseOperationStarted,
   PersistedConversationSchema,
+  ModelLibrarySchema,
+  ModelLoadEstimateSchema,
+  ModelProfileSchema,
+  ModelScanSummarySchema,
+  LocalModelSchema,
   PersistedWorkspaceSchema,
   ProviderDiagnosticsSchema,
   ProviderModelSchema,
@@ -12,6 +17,12 @@ import {
   type ChatEvent,
   type ChatRequest,
   type PersistedConversation,
+  type LoadPreset,
+  type LocalModel,
+  type ModelLibrary,
+  type ModelLoadEstimate,
+  type ModelProfile,
+  type ModelScanSummary,
   type PersistedWorkspace,
   type ProviderConfig,
   type ProviderDiagnostics,
@@ -91,6 +102,52 @@ export async function validateWorkspacePath(
 ): Promise<WorkspacePathDiagnostics> {
   const raw = await invoke<unknown>("validate_workspace_path", { path });
   return WorkspacePathDiagnosticsSchema.parse(raw);
+}
+
+
+
+export async function loadModelLibraries(): Promise<ModelLibrary[]> {
+  const raw = await invoke<unknown>("load_model_libraries");
+  return ModelLibrarySchema.array().parse(raw);
+}
+
+export async function saveModelLibrary(library: ModelLibrary): Promise<void> {
+  await invoke("save_model_library", { library });
+}
+
+export async function deleteModelLibrary(libraryId: string): Promise<boolean> {
+  return invoke<boolean>("delete_model_library", { libraryId });
+}
+
+export async function loadLocalModels(): Promise<LocalModel[]> {
+  const raw = await invoke<unknown>("load_local_models");
+  return LocalModelSchema.array().parse(raw);
+}
+
+export async function scanModelLibrary(libraryId: string): Promise<ModelScanSummary> {
+  const raw = await invoke<unknown>("scan_model_library", { libraryId });
+  return ModelScanSummarySchema.parse(raw);
+}
+
+export async function loadModelProfiles(): Promise<ModelProfile[]> {
+  const raw = await invoke<unknown>("load_model_profiles");
+  return ModelProfileSchema.array().parse(raw);
+}
+
+export async function saveModelProfile(profile: ModelProfile): Promise<void> {
+  await invoke("save_model_profile", { profile });
+}
+
+export async function deleteModelProfile(profileId: string): Promise<boolean> {
+  return invoke<boolean>("delete_model_profile", { profileId });
+}
+
+export async function estimateModelLoad(
+  modelId: string,
+  preset: LoadPreset,
+): Promise<ModelLoadEstimate> {
+  const raw = await invoke<unknown>("estimate_model_load", { modelId, preset });
+  return ModelLoadEstimateSchema.parse(raw);
 }
 
 export async function listenChatEvents(
