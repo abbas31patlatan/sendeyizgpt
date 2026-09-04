@@ -240,9 +240,7 @@ pub struct ApprovalRequestView {
 #[derive(Debug, Clone)]
 pub enum PermissionDecision {
     AutoApproved { permit: ExecutionPermit },
-    ApprovalRequired {
-        approval: Box<ApprovalRequest>,
-    },
+    ApprovalRequired { approval: Box<ApprovalRequest> },
     Denied { reason: String },
 }
 
