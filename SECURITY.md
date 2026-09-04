@@ -17,6 +17,19 @@ Security is a runtime invariant, not a prompt-writing convention.
 8. Provider API keys are session-only in the current chat slice and are never
    written to SQLite, localStorage or the workspace registry.
 
+## Local model catalog boundary
+
+The local catalog is deliberately metadata-only and user initiated:
+
+- Only a registered, canonicalized directory is scanned; symlinks are not followed.
+- Traversal, file count, metadata size, string size, array size and nesting are bounded.
+- GGUF headers and metadata are parsed; tensor data is never loaded or executed.
+- A corrupt file is returned as a non-fatal issue while valid models remain indexable.
+- Model metadata is persisted as bounded SQLite data; it is not a permission grant or
+  an instruction source for a model, agent or tool.
+- Load estimates and profiles are advisory preflight data. They do not claim that a
+  runtime has loaded the model or that the device can sustain the estimate.
+
 ## Trust zones
 
 | Zone | Examples | Allowed authority |
@@ -46,8 +59,9 @@ worker/core boundary, platform and whether a permit was required.
 ## Deliberate limitations in Milestone 1b
 
 The current foundation does not expose host filesystem, shell, browser,
-microphone, camera, screen or keyboard/mouse executors. Workspace registration
-only performs read-only path metadata validation; it is not a file access grant.
-This is intentional: the security contract is present before effectful features
-are added.
+microphone, camera, screen or keyboard/mouse executors, or native tensor
+inference/runtime loading. Workspace registration only performs read-only path
+metadata validation; the local model catalog only reads bounded GGUF metadata and
+returns advisory preflight estimates. Neither is a file access grant. This is
+intentional: the security contract is present before effectful features are added.
 

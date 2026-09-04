@@ -7,7 +7,7 @@ mediated by a native Permission Broker.
 
 ## Current status
 
-Milestone 0 foundation, M1a local chat and the M1b persistence/workspace slice are in place:
+Milestone 0 foundation, M1a local chat, M1b persistence/workspace and the M2a local model catalog/preflight slice are in place:
 
 - Tauri 2 + React/TypeScript desktop shell
 - Rust workspace with typed protocol, IPC authentication helpers, inference and agent contracts
@@ -20,13 +20,17 @@ Milestone 0 foundation, M1a local chat and the M1b persistence/workspace slice a
 - Native app-data database initialization with a localStorage fallback for Vite preview/private browsing
 - Read-only workspace path validation and a durable, explicitly scoped workspace registry
 - Provider health diagnostics with measured latency, live model catalog and model-card selection
+- Bounded, metadata-only GGUF scanner with canonical roots, symlink skipping, deterministic traversal and per-file issue reporting
+- SQLite-backed model libraries, real local inventory and Eco/Balanced/Performance profiles with advisory memory preflight
 - Per-provider system prompt, conversation rename/Markdown export and strict bilingual UX
 - Architecture, security, plugin and development documentation
 
-Native llama.cpp/GGUF inference, automatic model-library scanning, browser, audio,
-vision and real tool execution are not yet wired. Workspace registration currently
-validates and stores a path but does not grant file access; every future effect
-still needs the Permission Broker and a worker boundary.
+Native llama.cpp tensor inference/generation, browser, audio, vision and real tool
+execution are not yet wired. The model library now performs an explicit, bounded
+metadata-only scan of registered GGUF directories, persists a SQLite snapshot and
+preflights load profiles without loading tensors. Workspace registration and model
+catalog access still do not grant files to a model or agent; every future effect
+needs the Permission Broker and a worker boundary.
 
 ## Prerequisites
 
@@ -117,6 +121,10 @@ stores the result as a named scope. Registration alone does not expose files to
 the model or an agent. That access will be added only with a previewable,
 Permission-Broker-mediated tool worker.
 
-The **Model library** view's connection check is an actual provider request. It
-reports route class (local/remote), round-trip latency, retryability and the
-provider's live `/models` catalog. No model card is synthetic.
+The **Model library** view has two real workflows. Provider diagnostics make an
+actual request, report route class (local/remote), round-trip latency, retryability
+and the provider's live `/models` catalog. Local model registration canonicalizes a
+user-selected directory, reads only bounded GGUF headers/metadata, retains valid
+models when another file is corrupt, and stores the indexed snapshot in SQLite.
+Profiles are saved separately and their weight/KV-cache/RAM/VRAM figures are
+explicitly advisory until a native runtime reports actual metrics.

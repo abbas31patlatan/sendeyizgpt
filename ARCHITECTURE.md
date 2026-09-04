@@ -1,6 +1,6 @@
 # Aegis AI architecture
 
-Status: Milestone 1b persistence/workspace slice, version `0.1.0`.
+Status: Milestone 2a local GGUF catalog/load-preflight slice, version `0.1.0`.
 
 ## A. Product definition
 
@@ -24,10 +24,12 @@ The product has four non-negotiable properties:
 
 The initial release deliberately does not pretend to implement computer
 control, browser interaction, microphone capture, screen capture, MCP
-execution, automatic model scanning or a native inference backend. The current
-workspace registry can validate and store a directory scope, but it does not
-read project files. Effectful capabilities are introduced only when their
-worker, policy, preview, audit and test boundaries exist.
+execution, native tensor inference or a native runtime backend. The current
+workspace registry can validate and store a directory scope, while the local
+model catalog can explicitly scan registered GGUF roots for bounded metadata.
+Neither feature grants file access to a model or agent. Effectful capabilities
+are introduced only when their worker, policy, preview, audit and test boundaries
+exist.
 
 ## B. Technology decisions
 
@@ -173,6 +175,26 @@ request a broker permit and revalidate the path immediately before execution.
 
 The frontend validates every native response with Zod and falls back to
 localStorage only when the Tauri bridge is unavailable in development preview.
+
+### Local GGUF catalog and load preflight
+
+The desktop shell exposes an explicit, user-initiated model-library workflow.
+A registered root is canonicalized and scanned deterministically without following
+symlinks. The scanner reads GGUF magic/version and metadata only; it never opens
+tensor data or executes a model. A malformed file becomes a bounded issue while
+valid files remain in the SQLite snapshot.
+
+The parser limits metadata keys to 4,096, strings to 1 MiB, arrays to 16,384
+items, nesting to eight levels, metadata input to 8 MiB and serialized metadata
+to 4 MiB. Directory traversal is limited to depth eight and 2,048 files. These
+limits apply before metadata is persisted or returned over Tauri IPC.
+
+Selecting a model re-inspects the file and verifies its size and metadata hash
+before estimating a saved Eco, Balanced or Performance profile. Context capacity
+and resource limits are validated against the model descriptor. Weight, KV-cache,
+RAM and VRAM values include a confidence label and are preflight guidance only;
+actual worker/runtime metrics remain a separate contract. Native llama.cpp tensor
+loading and generation are intentionally not claimed by this slice.
 
 ## F. Inference architecture
 
@@ -417,8 +439,8 @@ policy, audit integrity and application availability.
 | --- | --- | --- |
 | M0 | Architecture, threat model, repo, CI shape, desktop shell, typed contracts, broker core | Shell builds; broker/database/protocol tests pass; no execution path exists |
 | M1a | Chat UI, OpenAI-compatible local provider, typed streaming events, connection diagnostics and session settings | Ollama/LM Studio-compatible endpoint can stream/cancel; provider, SSE and security tests pass |
-| M1b | SQLite conversation repositories, supervised llama.cpp worker, GGUF load and streaming | Small GGUF can load on CPU; stream/cancel/restart tested |
-| M2 | Model manager, library scan, GGUF metadata, Vulkan detection, offload, profiles and metrics | RX 5700 XT Vulkan profile is detected and estimates are visibly separate from actuals |
+| M1b | SQLite conversation repositories, reasoning preservation and workspace registry | Conversations and named scopes survive restart; workspace registration is read-only and broker-free |
+| M2a | Bounded GGUF library scan, metadata inventory, persisted model profiles and load preflight | Canonical roots scan safely; corrupt files are reported; profile estimates validate against model capacity |
 | M3 | Tool runtime, broker UI, audit log, filesystem read, safe shell proposal | Approval is required for every side effect and is integration-tested |
 | M4 | Coding workspace, project search, diff/edit flow, Git state, bounded coding agent | Write/test actions require separate previews and approvals |
 | M5 | MCP, search provider, browser worker and citations | Untrusted web content cannot alter policy; citations reference fetched sources |
@@ -427,9 +449,10 @@ policy, audit integrity and application availability.
 | M8 | Event engine, weather/earthquake providers, scheduler and notifications | Sources/update times visible; automations are inspectable and cancellable |
 | M9 | Plugin SDK, WASM/process host, routing, custom architectures, signed runtime updates | Compatibility and sandbox policy tested across plugin versions |
 
-M0 is the implemented source foundation. M1a is the first implemented product
-slice: it exercises a real OpenAI-compatible provider end to end. M1b remains
-the next step for fully local llama.cpp/GGUF inference and durable repositories.
+M0, M1a and the M1b persistence/workspace slice are implemented product
+foundations. M2a adds the real local GGUF catalog and load preflight described
+above. Fully local llama.cpp tensor inference, Vulkan detection/offload and
+runtime metrics remain the next worker-backed integration boundary.
 
 ## N. Highest technical risks
 

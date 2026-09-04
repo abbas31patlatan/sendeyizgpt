@@ -54,6 +54,24 @@ The provider adapter validates message count, message size, sampling values,
 base URL credentials, response framing and cancellation before a request can
 start.
 
+### Local GGUF catalog checks
+
+The model-library path is a real native workflow, not seeded demo data. Register a
+small test directory from the desktop UI, scan it, and verify that valid `.gguf`
+files appear with their parsed architecture, context and quantization metadata.
+Add a deliberately corrupt `.gguf` file to confirm it is reported as an issue
+without hiding the valid model. Re-scan after changing or removing a file and
+confirm the SQLite snapshot reflects the current directory.
+
+The scanner must remain metadata-only and bounded: do not add tensor reads, model
+execution, symlink traversal or unbounded recursive discovery. A successful load
+preflight validates the profile and reports estimates; it is not evidence that a
+native runtime has loaded the model. Run the focused tests with:
+
+```powershell
+cargo test -p aegis-inference catalog
+cargo test -p aegis-database model_library_repository
+```
 
 ## Windows build
 
