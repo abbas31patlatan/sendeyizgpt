@@ -15,6 +15,94 @@ export const RuntimeStatusSchema = z.object({
 
 export type RuntimeStatus = z.infer<typeof RuntimeStatusSchema>;
 
+export const ChatRoleSchema = z.enum([
+  "system",
+  "developer",
+  "user",
+  "assistant",
+  "tool",
+]);
+
+export const ChatMessageSchema = z.object({
+  role: ChatRoleSchema,
+  content: z.string(),
+});
+
+export type ChatRole = z.infer<typeof ChatRoleSchema>;
+export type ChatMessage = z.infer<typeof ChatMessageSchema>;
+
+export const ProviderConfigSchema = z.object({
+  base_url: z.string().min(1),
+  model: z.string().min(1),
+  api_key: z.string().optional(),
+});
+
+export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
+
+export const ChatRequestSchema = z.object({
+  provider: ProviderConfigSchema,
+  messages: z.array(ChatMessageSchema).min(1),
+  max_tokens: z.number().int().positive(),
+  temperature: z.number().min(0).max(2),
+});
+
+export type ChatRequest = z.infer<typeof ChatRequestSchema>;
+
+export const ProviderModelSchema = z.object({
+  id: z.string().min(1),
+  owned_by: z.string().nullable(),
+});
+
+export type ProviderModel = z.infer<typeof ProviderModelSchema>;
+
+const OperationStartedSchema = z.object({
+  operation_id: z.string().min(1),
+});
+
+export const ChatEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("started"),
+    operation_id: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal("token"),
+    operation_id: z.string().min(1),
+    text: z.string(),
+  }),
+  z.object({
+    type: z.literal("reasoning"),
+    operation_id: z.string().min(1),
+    text: z.string(),
+  }),
+  z.object({
+    type: z.literal("finished"),
+    operation_id: z.string().min(1),
+    generated_tokens: z.number().int().nonnegative(),
+    prompt_tokens: z.number().int().nonnegative().nullable(),
+    time_to_first_token_ms: z.number().nonnegative().nullable(),
+    generation_duration_ms: z.number().nonnegative(),
+    finish_reason: z.string().nullable(),
+  }),
+  z.object({
+    type: z.literal("failed"),
+    operation_id: z.string().min(1),
+    code: z.string(),
+    message: z.string(),
+    retryable: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("cancelled"),
+    operation_id: z.string().min(1),
+  }),
+]);
+
+export type ChatEvent = z.infer<typeof ChatEventSchema>;
+export type OperationStarted = z.infer<typeof OperationStartedSchema>;
+
+export function parseOperationStarted(value: unknown): OperationStarted {
+  return OperationStartedSchema.parse(value);
+}
+
 export const initialUnavailableStatus: RuntimeStatus = {
   app_version: "—",
   core_state: "degraded",
@@ -28,8 +116,8 @@ export const initialUnavailableStatus: RuntimeStatus = {
   last_error: "Desktop core is not connected. Launch the Tauri shell to connect.",
 };
 
-export function formatBytes(bytes: number | null): string {
-  if (bytes === null) {
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) {
     return "—";
   }
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -39,5 +127,5 @@ export function formatBytes(bytes: number | null): string {
     value /= 1024;
     unit += 1;
   }
-  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+  return value.toFixed(unit === 0 ? 0 : 1) + " " + units[unit];
 }
