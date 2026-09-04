@@ -1,9 +1,8 @@
 //! Tool manifests, broker-mediated invocation and untrusted output types.
 
 use aegis_permissions::{
-    ActionKind, ActionPreview, ActionRequest, ActionTarget, ApprovalRequest, Capability,
-    CommandPreview, ExecutionPermit, PermissionBroker, PermissionDecision, PermissionError,
-    PermissionPolicy, RiskLevel,
+    ActionRequest, ApprovalRequest, Capability, ExecutionPermit, PermissionBroker,
+    PermissionDecision, PermissionError, RiskLevel,
 };
 use aegis_protocol::RequestId;
 use async_trait::async_trait;
@@ -420,6 +419,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aegis_permissions::{
+        ActionKind, ActionPreview, ActionTarget, CommandPreview, PermissionPolicy,
+    };
     use chrono::Utc;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
