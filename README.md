@@ -14,7 +14,8 @@ Milestone 0 foundation and the first M1 chat slice are in place:
 - Permission Broker with workspace path checks, approval records and one-time execution permits
 - SQLite migration with foreign keys, WAL and core domain tables
 - OpenAI-compatible provider adapter with validation, SSE streaming, cancellation and retry classification
-- Functional chat/settings UI with typed Tauri events, local conversation history and explicit unavailable surfaces
+- Responsive bilingual chat/settings UI with Turkish/English copy, system/dark/light themes, searchable conversation history and explicit unavailable surfaces
+- Frame-batched streaming updates and debounced browser persistence to keep long responses responsive
 - Architecture, security, plugin and development documentation
 
 Native llama.cpp/GGUF inference, model scanning, browser, audio, vision and real
@@ -69,8 +70,22 @@ local storage.
    can be cancelled from the composer or **Stop everything**.
 
 Default local endpoint: `http://127.0.0.1:11434/v1` (Ollama). LM Studio
-normally uses `http://127.0.0.1:1234/v1`. The optional API key is held only
-in memory for the current session and is never persisted by the frontend.
+normally uses `http://127.0.0.1:1234/v1`. Quick provider cards can apply
+either local endpoint. The optional API key is held only in memory for the
+current session and is never persisted by the frontend.
+
+## Interface and performance
+
+The interface follows the operating-system language on first launch and can be
+switched between Turkish and English from the top bar. System, dark and light
+themes are persisted as non-secret preferences. Recent conversations can be
+searched with `Ctrl+K`, created with `Ctrl+N`, copied message-by-message and
+deleted with confirmation.
+
+Streaming token and reasoning events are coalesced into animation-frame updates
+before React state is changed. Conversation/settings persistence is debounced,
+which avoids serializing the full history for every incoming token while
+retaining the existing local-first behavior.
 
 ## Documents
 
