@@ -1,6 +1,6 @@
 //! SQLite connection setup and transactional schema migrations.
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use std::path::Path;
 use thiserror::Error;
 
