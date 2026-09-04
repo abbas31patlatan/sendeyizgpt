@@ -1,13 +1,13 @@
 # Aegis AI architecture
 
-Status: Milestone 2b supervised native llama.cpp GGUF runtime, version `0.1.0`.
+Status: Milestone 2c supervised native llama.cpp GGUF runtime and local prompt automations, version `0.1.0`.
 
 ## A. Product definition
 
 Aegis AI is a Windows 10/11 x64 native desktop AI work environment, not a
 chat-only client. It combines local model management, agent orchestration,
 permissioned tools, coding workspaces and future voice, vision, browser,
-provider and automation capabilities behind stable native contracts.
+provider and event-driven automation capabilities behind stable native contracts.
 
 The product has four non-negotiable properties:
 
@@ -25,7 +25,8 @@ The product has four non-negotiable properties:
 The initial release deliberately does not pretend to implement computer
 control, browser interaction, microphone capture, screen capture, MCP execution,
 or a general-purpose tool executor. Aegis now has a supervised native llama.cpp
-GGUF runtime, while browser/audio/vision/tool capabilities still require their
+GGUF runtime and an app-open local prompt routine scheduler. Browser/audio/vision,
+external event automation, tool execution and notifications still require their
 own worker, policy, preview, audit and test boundaries. Workspace registration and
 model catalog access never grant arbitrary files to a model or agent.
 
@@ -66,6 +67,17 @@ model catalog access never grant arbitrary files to a model or agent.
 - **Vector database in the first milestone:** rejected. It adds storage and
   dependency weight before the model/chat/workspace primitives exist. RAG gets
   an adapter after retrieval needs are measured.
+
+### Local automation boundary
+
+The current automation surface is intentionally narrow and inspectable. A
+routine stores a bounded prompt, an interval and execution state in SQLite. While
+the desktop app is open, the frontend scheduler checks due routines and submits
+the prompt through the same typed provider boundary as a normal chat. A run gets
+its own conversation ID, preserving the full streamed response, cancellation and
+error state. The scheduler never interprets prompt text as a command and cannot
+launch tools, write a workspace or create an external notification. Background
+execution and event-source triggers belong to the later event engine milestone.
 
 ## C. Process and worker topology
 
@@ -452,6 +464,7 @@ policy, audit integrity and application availability.
 | M1b | SQLite conversation repositories, reasoning preservation and workspace registry | Conversations and named scopes survive restart; workspace registration is read-only and broker-free |
 | M2a | Bounded GGUF library scan, metadata inventory, persisted model profiles and load preflight | Canonical roots scan safely; corrupt files are reported; profile estimates validate against model capacity |
 | M2b | Supervised native llama.cpp GGUF tensor runtime | Pinned Windows runtime builds; Tauri owns start/stop; model hash is rechecked; `/health` gates Ready; bilingual UI routes loopback streaming |
+| M2c | Local prompt automations | SQLite routine registry; active-provider execution; inspectable result conversations; app-open interval scheduler; no tools or host side effects |
 | M3 | Tool runtime, broker UI, audit log, filesystem read, safe shell proposal | Approval is required for every side effect and is integration-tested |
 | M4 | Coding workspace, project search, diff/edit flow, Git state, bounded coding agent | Write/test actions require separate previews and approvals |
 | M5 | MCP, search provider, browser worker and citations | Untrusted web content cannot alter policy; citations reference fetched sources |
@@ -460,7 +473,7 @@ policy, audit integrity and application availability.
 | M8 | Event engine, weather/earthquake providers, scheduler and notifications | Sources/update times visible; automations are inspectable and cancellable |
 | M9 | Plugin SDK, WASM/process host, routing, custom architectures, signed runtime updates | Compatibility and sandbox policy tested across plugin versions |
 
-M0, M1a, M1b, M2a and M2b are implemented product foundations. M2b adds the
+M0, M1a, M1b, M2a, M2b and M2c are implemented product foundations. M2b adds the
 real native llama.cpp tensor-loading boundary described above. Vulkan/GPU
 capability detection, adaptive offload telemetry, tool execution and the other
 worker-backed capabilities remain subsequent integration boundaries.

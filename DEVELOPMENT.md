@@ -55,6 +55,26 @@ The provider adapter validates message count, message size, sampling values,
 base URL credentials, response framing and cancellation before a request can
 start.
 
+### Local prompt automations
+
+Automations are intentionally limited to repeatable chat prompts. Verify the
+following on a Windows desktop build:
+
+1. Create a routine with a short interval and keep it disabled until the provider
+   connection has been checked.
+2. Enable it, wait for the app-open scheduler to create a separate conversation,
+   then inspect the streamed result from the Automations card.
+3. Pause the routine and confirm no further run is started; delete it only after a
+   completed or cancelled run.
+4. Restart the app and confirm the routine definition, status and next-run state
+   survive through SQLite.
+5. Confirm routine prompts never launch tools, shell commands or writes, and that
+   an API key remains session-only.
+
+The scheduler is a foreground/app-open boundary. Do not describe it as an OS
+background task or event-source engine until the permission, notification and
+worker boundaries are implemented.
+
 ### Local GGUF catalog checks
 
 The model-library path is a real native workflow, not seeded demo data. Register a
@@ -140,8 +160,9 @@ support cancellation without moving C/C++ code into the Tauri process.
 The Tauri shell opens `aegis.sqlite3` in the per-user application-data directory
 and applies migrations before commands are exposed. `aegis-database` owns typed
 repository records and transaction boundaries. Conversation snapshots preserve
-message reasoning and delete through foreign-key cascade. The frontend pauses
-native conversation writes while streaming and flushes after a terminal event.
+message reasoning and delete through foreign-key cascade. Local automation definitions
+share the same typed repository and survive restarts. The frontend pauses native
+conversation writes while streaming and flushes after a terminal event.
 
 The workspace registry intentionally stops at read-only metadata validation:
 `validate_workspace_path` checks existence, directory shape and canonical path

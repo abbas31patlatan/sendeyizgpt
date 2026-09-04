@@ -7,7 +7,7 @@ mediated by a native Permission Broker.
 
 ## Current status
 
-Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model catalog/preflight and M2b supervised native llama.cpp runtime are in place:
+Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model catalog/preflight, M2b supervised native llama.cpp runtime and M2c local prompt automations are in place:
 
 - Tauri 2 + React/TypeScript desktop shell
 - Rust workspace with typed protocol, IPC authentication helpers, inference and agent contracts
@@ -24,6 +24,7 @@ Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model cat
 - SQLite-backed model libraries, real local inventory and Eco/Balanced/Performance profiles with advisory memory preflight
 - Supervised native llama.cpp `llama-server` lifecycle: GGUF revalidation, real tensor-load health gate, loopback endpoint and clean unload
 - Bilingual native runtime controls with bundled pinned CPU runtime support and explicit external GPU-runtime path selection
+- Durable local prompt routines that run through the active provider, create inspectable result conversations and repeat only while the desktop app is open
 - Per-provider system prompt, conversation rename/Markdown export and strict bilingual UX
 - Architecture, security, plugin and development documentation
 
@@ -111,6 +112,17 @@ its Prometheus metrics endpoint, the runtime panel shows bounded prompt and
 generation throughput, token counters and queue state; unavailable telemetry is
 shown as unavailable rather than fabricated.
 
+## Local prompt routines
+
+The **Automations** view is a real, SQLite-backed local routine manager. Create a
+named prompt, choose an interval from 1 to 10,080 minutes and optionally enable
+it. Each run uses the current provider session and is stored as a normal
+conversation, so the output remains searchable, exportable and manually
+inspectable. The scheduler wakes while the desktop app is open; it does not
+run tools, shell commands or host-side effects. OS background scheduling and
+external event sources remain separate capabilities until their permission,
+notification and audit boundaries are implemented.
+
 ## Interface and performance
 
 The interface follows the operating-system language on first launch and can be
@@ -138,8 +150,8 @@ conversation snapshot and keeps browser localStorage as a preview fallback.
 
 When the Tauri shell is running, Aegis initializes `aegis.sqlite3` inside the
 current user's application-data directory and applies numbered migrations before
-registering commands. Conversations, assistant reasoning traces and named
-workspace scopes survive restarts. A Vite preview without the native bridge keeps
+registering commands. Conversations, assistant reasoning traces, named workspace scopes and local
+automation definitions survive restarts. A Vite preview without the native bridge keeps
 the best-effort localStorage fallback so the interface remains inspectable.
 
 The **Workspaces** view performs a read-only native metadata check for an existing
