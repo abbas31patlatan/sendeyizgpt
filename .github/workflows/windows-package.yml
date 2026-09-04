@@ -65,7 +65,7 @@ jobs:
 
       - name: Build pinned llama.cpp runtime
         shell: pwsh
-        run: .scriptsuild-llama-runtime.ps1
+        run: .\scripts\build-llama-runtime.ps1
 
       - name: Build Tauri installers
         shell: pwsh
