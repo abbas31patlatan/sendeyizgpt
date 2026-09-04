@@ -138,10 +138,7 @@ fn save_workspace(
 }
 
 #[tauri::command]
-fn delete_workspace(
-    state: State<'_, DesktopState>,
-    workspace_id: String,
-) -> Result<bool, String> {
+fn delete_workspace(state: State<'_, DesktopState>, workspace_id: String) -> Result<bool, String> {
     state
         .database
         .delete_workspace(&workspace_id)

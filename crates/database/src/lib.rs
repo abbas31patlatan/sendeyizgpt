@@ -1,7 +1,7 @@
 //! SQLite connection setup, transactional schema migrations and durable domain repositories.
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
@@ -290,8 +290,7 @@ fn read_messages(
         .map_err(DatabaseError::Repository)?;
 
     rows.map(|row| {
-        let (id, role, content, reasoning, created_at) =
-            row.map_err(DatabaseError::Repository)?;
+        let (id, role, content, reasoning, created_at) = row.map_err(DatabaseError::Repository)?;
         let content = content.ok_or_else(|| {
             DatabaseError::InvalidData(format!(
                 "message {id} has external content that cannot be restored yet"
@@ -587,7 +586,10 @@ mod tests {
         database
             .save_conversation(&conversation)
             .expect("conversation saves");
-        assert_eq!(database.list_conversations().expect("conversation loads"), vec![conversation]);
+        assert_eq!(
+            database.list_conversations().expect("conversation loads"),
+            vec![conversation]
+        );
     }
 
     #[test]
@@ -602,9 +604,16 @@ mod tests {
         database
             .save_conversation(&conversation)
             .expect("conversation saves");
-        assert!(database
-            .delete_conversation(&conversation.id)
-            .expect("conversation deletes"));
-        assert!(database.list_conversations().expect("conversation loads").is_empty());
+        assert!(
+            database
+                .delete_conversation(&conversation.id)
+                .expect("conversation deletes")
+        );
+        assert!(
+            database
+                .list_conversations()
+                .expect("conversation loads")
+                .is_empty()
+        );
     }
 }
