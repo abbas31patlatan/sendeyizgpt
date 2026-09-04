@@ -1,15 +1,19 @@
 use aegis_core::{ApplicationCore, RuntimeStatus};
+use aegis_database::{ConversationRecord, Database, WorkspaceRecord};
 use aegis_providers::{
     ChatChunk, ChatCompletionSummary, ChatRequest, OpenAiCompatibleClient, ProviderConfig,
     ProviderError, ProviderModel,
 };
 use serde::Serialize;
+use std::path::Path;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State};
+use std::time::Instant;
+use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 pub struct DesktopState {
     pub core: Arc<ApplicationCore>,
+    pub database: Arc<Database>,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,6 +54,28 @@ enum ChatEvent {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderDiagnostics {
+    status: String,
+    endpoint: String,
+    local: bool,
+    latency_ms: f64,
+    model_count: usize,
+    models: Vec<ProviderModel>,
+    error: Option<String>,
+    retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspacePathDiagnostics {
+    exists: bool,
+    is_directory: bool,
+    canonical_path: Option<String>,
+    error: Option<String>,
+}
+
 fn emit_chat(app: &AppHandle, event: ChatEvent) {
     let _ = app.emit("aegis://chat", event);
 }
@@ -60,6 +86,100 @@ fn runtime_status(state: State<'_, DesktopState>) -> Result<RuntimeStatus, Strin
         .core
         .runtime_status()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_conversations(state: State<'_, DesktopState>) -> Result<Vec<ConversationRecord>, String> {
+    state
+        .database
+        .list_conversations()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_conversation(
+    state: State<'_, DesktopState>,
+    conversation: ConversationRecord,
+) -> Result<(), String> {
+    state
+        .database
+        .save_conversation(&conversation)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_conversation(
+    state: State<'_, DesktopState>,
+    conversation_id: String,
+) -> Result<bool, String> {
+    state
+        .database
+        .delete_conversation(&conversation_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_workspaces(state: State<'_, DesktopState>) -> Result<Vec<WorkspaceRecord>, String> {
+    state
+        .database
+        .list_workspaces()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_workspace(
+    state: State<'_, DesktopState>,
+    workspace: WorkspaceRecord,
+) -> Result<(), String> {
+    state
+        .database
+        .save_workspace(&workspace)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_workspace(
+    state: State<'_, DesktopState>,
+    workspace_id: String,
+) -> Result<bool, String> {
+    state
+        .database
+        .delete_workspace(&workspace_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn validate_workspace_path(path: String) -> WorkspacePathDiagnostics {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return WorkspacePathDiagnostics {
+            exists: false,
+            is_directory: false,
+            canonical_path: None,
+            error: Some("workspace path cannot be empty".to_owned()),
+        };
+    }
+
+    let path_ref = Path::new(trimmed);
+    match std::fs::metadata(path_ref) {
+        Ok(metadata) => {
+            let is_directory = metadata.is_dir();
+            WorkspacePathDiagnostics {
+                exists: true,
+                is_directory,
+                canonical_path: std::fs::canonicalize(path_ref)
+                    .ok()
+                    .map(|value| value.to_string_lossy().into_owned()),
+                error: (!is_directory).then(|| "path is not a directory".to_owned()),
+            }
+        }
+        Err(error) => WorkspacePathDiagnostics {
+            exists: false,
+            is_directory: false,
+            canonical_path: None,
+            error: Some(error.to_string()),
+        },
+    }
 }
 
 #[tauri::command]
@@ -167,6 +287,38 @@ async fn list_provider_models(config: ProviderConfig) -> Result<Vec<ProviderMode
 }
 
 #[tauri::command]
+async fn inspect_provider(config: ProviderConfig) -> Result<ProviderDiagnostics, String> {
+    let endpoint_url = config.validate().map_err(|error| error.to_string())?;
+    let endpoint = endpoint_url.as_str().trim_end_matches('/').to_owned();
+    let local = endpoint_url.scheme() == "http";
+    let client = OpenAiCompatibleClient::new(config).map_err(|error| error.to_string())?;
+    let started = Instant::now();
+
+    match client.list_models().await {
+        Ok(models) => Ok(ProviderDiagnostics {
+            status: "connected".to_owned(),
+            endpoint,
+            local,
+            latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+            model_count: models.len(),
+            models,
+            error: None,
+            retryable: false,
+        }),
+        Err(error) => Ok(ProviderDiagnostics {
+            status: "error".to_owned(),
+            endpoint,
+            local,
+            latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+            model_count: 0,
+            models: Vec::new(),
+            error: Some(error.to_string()),
+            retryable: error.is_retryable(),
+        }),
+    }
+}
+
+#[tauri::command]
 fn cancel_operation(state: State<'_, DesktopState>, operation_id: String) -> Result<bool, String> {
     let operation_id =
         Uuid::parse_str(&operation_id).map_err(|error| format!("invalid operation id: {error}"))?;
@@ -184,6 +336,16 @@ fn stop_everything(state: State<'_, DesktopState>) -> Result<usize, String> {
         .map_err(|error| error.to_string())
 }
 
+fn initialize_database(app: &AppHandle) -> Result<Database, std::io::Error> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    std::fs::create_dir_all(&data_dir)?;
+    Database::open(data_dir.join("aegis.sqlite3"))
+        .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
 pub fn run() {
     let core = match ApplicationCore::new() {
         Ok(core) => Arc::new(core),
@@ -194,11 +356,26 @@ pub fn run() {
     };
 
     if let Err(error) = tauri::Builder::default()
-        .manage(DesktopState { core })
+        .setup(move |app| -> Result<(), Box<dyn std::error::Error>> {
+            let database = initialize_database(app.handle())?;
+            app.manage(DesktopState {
+                core: Arc::clone(&core),
+                database: Arc::new(database),
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             runtime_status,
+            load_conversations,
+            save_conversation,
+            delete_conversation,
+            load_workspaces,
+            save_workspace,
+            delete_workspace,
+            validate_workspace_path,
             start_chat,
             list_provider_models,
+            inspect_provider,
             cancel_operation,
             stop_everything
         ])

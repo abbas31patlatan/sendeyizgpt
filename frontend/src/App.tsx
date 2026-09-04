@@ -9,20 +9,31 @@ import {
 } from "react";
 import {
   cancelOperation,
+  deletePersistedConversation,
+  deletePersistedWorkspace,
   getRuntimeStatus,
-  listProviderModels,
+  inspectProvider,
   listenChatEvents,
+  loadPersistedConversations,
+  loadPersistedWorkspaces,
+  savePersistedConversation,
+  savePersistedWorkspace,
   startChat,
   stopEverything,
+  validateWorkspacePath,
 } from "./ipc";
 import {
   formatBytes,
   initialUnavailableStatus,
   type ChatEvent,
   type ChatMessage,
+  type PersistedConversation,
+  type PersistedWorkspace,
   type ProviderConfig,
+  type ProviderDiagnostics,
   type ProviderModel,
   type RuntimeStatus,
+  type WorkspacePathDiagnostics,
 } from "./protocol";
 import { translate, type Locale, type TranslationKey } from "./i18n";
 import "./chat.css";
@@ -44,12 +55,15 @@ type Conversation = {
   updatedAt: number;
 };
 
+type Workspace = PersistedWorkspace;
+
 type ProviderSettings = {
   base_url: string;
   model: string;
   api_key: string;
   max_tokens: number;
   temperature: number;
+  system_prompt: string;
 };
 
 type Theme = "system" | "dark" | "light";
@@ -67,6 +81,7 @@ type ChatBinding = {
 const CONVERSATIONS_KEY = "aegis.conversations.v1";
 const SETTINGS_KEY = "aegis.provider-settings.v1";
 const UI_PREFERENCES_KEY = "aegis.ui-preferences.v1";
+const WORKSPACES_KEY = "aegis.workspaces.v1";
 
 const navigation: Array<{ id: View; labelKey: TranslationKey; glyph: string }> = [
   { id: "chats", labelKey: "navChats", glyph: "◌" },
@@ -81,6 +96,7 @@ const defaultSettings: ProviderSettings = {
   api_key: "",
   max_tokens: 1024,
   temperature: 0.7,
+  system_prompt: "",
 };
 
 function createId(prefix: string): string {
@@ -145,6 +161,10 @@ function loadSettings(): ProviderSettings {
         typeof value.temperature === "number" && Number.isFinite(value.temperature)
           ? Math.min(2, Math.max(0, value.temperature))
           : defaultSettings.temperature,
+      system_prompt:
+        typeof value.system_prompt === "string"
+          ? value.system_prompt.slice(0, 16_384)
+          : defaultSettings.system_prompt,
     };
   } catch {
     return defaultSettings;
@@ -170,6 +190,86 @@ function loadUiPreferences(): UiPreferences {
       theme: "system",
     };
   }
+}
+
+function isWorkspace(value: unknown): value is Workspace {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<Workspace>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    typeof candidate.rootPath === "string" &&
+    typeof candidate.createdAt === "number" &&
+    typeof candidate.updatedAt === "number"
+  );
+}
+
+function loadLocalWorkspaces(): Workspace[] {
+  try {
+    const raw = window.localStorage.getItem(WORKSPACES_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isWorkspace) : [];
+  } catch {
+    return [];
+  }
+}
+
+function fromPersistedConversation(value: PersistedConversation): Conversation {
+  return {
+    id: value.id,
+    title: value.title,
+    updatedAt: value.updatedAt,
+    messages: value.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      reasoning: message.reasoning ?? undefined,
+      createdAt: message.createdAt,
+    })),
+  };
+}
+
+function toPersistedConversation(value: Conversation): PersistedConversation {
+  return {
+    id: value.id,
+    title: value.title,
+    updatedAt: value.updatedAt,
+    messages: value.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      reasoning: message.reasoning ?? null,
+      createdAt: message.createdAt,
+    })),
+  };
+}
+
+function mergeConversations(...groups: Conversation[][]): Conversation[] {
+  const byId = new Map<string, Conversation>();
+  for (const group of groups) {
+    for (const conversation of group) {
+      const current = byId.get(conversation.id);
+      if (!current || conversation.updatedAt >= current.updatedAt) {
+        byId.set(conversation.id, conversation);
+      }
+    }
+  }
+  return [...byId.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function safeExportName(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return normalized || "aegis-conversation";
 }
 
 function errorMessage(error: unknown): string {
@@ -200,6 +300,15 @@ function App() {
   });
   const [settings, setSettings] = useState<ProviderSettings>(loadSettings);
   const [uiPreferences, setUiPreferences] = useState<UiPreferences>(loadUiPreferences);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>(loadLocalWorkspaces);
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [workspaceDiagnostics, setWorkspaceDiagnostics] =
+    useState<WorkspacePathDiagnostics | null>(null);
+  const [workspaceMessage, setWorkspaceMessage] = useState<string | null>(null);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [persistenceHydrated, setPersistenceHydrated] = useState(false);
+  const [workspacesHydrated, setWorkspacesHydrated] = useState(false);
   const [draft, setDraft] = useState("");
   const [conversationQuery, setConversationQuery] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -208,6 +317,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [providerDiagnostics, setProviderDiagnostics] =
+    useState<ProviderDiagnostics | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const operationBindings = useRef(new Map<string, ChatBinding>());
   const queuedEvents = useRef(new Map<string, ChatEvent[]>());
@@ -239,6 +350,10 @@ function App() {
   }, [conversationQuery, conversations, localeTag]);
   const isStreaming = streamingOperation !== null;
   const coreReady = runtime.core_state === "ready";
+  const selectedProviderModel = useMemo(
+    () => modelOptions.find((model) => model.id === settings.model.trim()) ?? null,
+    [modelOptions, settings.model],
+  );
 
   const refreshRuntime = useCallback(async () => {
     try {
@@ -415,6 +530,63 @@ function App() {
   }, [onChatEvent, refreshRuntime]);
 
   useEffect(() => {
+    let disposed = false;
+    void loadPersistedConversations()
+      .then((stored) => {
+        if (disposed) {
+          return;
+        }
+        const restored = stored.map(fromPersistedConversation);
+        if (restored.length > 0) {
+          setConversations((current) => mergeConversations(restored, current));
+          setActiveConversationId((current) => current ?? restored[0]?.id ?? null);
+        }
+        setPersistenceHydrated(true);
+      })
+      .catch(() => {
+        if (!disposed) {
+          setPersistenceHydrated(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void loadPersistedWorkspaces()
+      .then((stored) => {
+        if (disposed) {
+          return;
+        }
+        if (stored.length > 0) {
+          setWorkspaces((current) => {
+            const byId = new Map(current.map((workspace) => [workspace.id, workspace]));
+            for (const workspace of stored) {
+              const currentWorkspace = byId.get(workspace.id);
+              if (!currentWorkspace || workspace.updatedAt >= currentWorkspace.updatedAt) {
+                byId.set(workspace.id, workspace);
+              }
+            }
+            return [...byId.values()].sort(
+              (left, right) => right.updatedAt - left.updatedAt,
+            );
+          });
+        }
+        setWorkspacesHydrated(true);
+      })
+      .catch(() => {
+        if (!disposed) {
+          setWorkspacesHydrated(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const persistenceTimer = window.setTimeout(() => {
       try {
         window.localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations));
@@ -423,15 +595,45 @@ function App() {
           model: settings.model,
           max_tokens: settings.max_tokens,
           temperature: settings.temperature,
+          system_prompt: settings.system_prompt,
         };
         window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(nonSecretSettings));
+        window.localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
         window.localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
       } catch {
         // Persistence is best effort; the chat remains usable in private browsing.
       }
     }, 300);
     return () => window.clearTimeout(persistenceTimer);
-  }, [conversations, settings, uiPreferences]);
+  }, [conversations, settings, uiPreferences, workspaces]);
+
+  useEffect(() => {
+    if (!persistenceHydrated || isStreaming) {
+      return;
+    }
+    const persistenceTimer = window.setTimeout(() => {
+      for (const conversation of conversations) {
+        void savePersistedConversation(toPersistedConversation(conversation)).catch(() => {
+          // Vite preview and private browser mode intentionally have no native database.
+        });
+      }
+    }, 450);
+    return () => window.clearTimeout(persistenceTimer);
+  }, [conversations, isStreaming, persistenceHydrated]);
+
+  useEffect(() => {
+    if (!workspacesHydrated) {
+      return;
+    }
+    const persistenceTimer = window.setTimeout(() => {
+      for (const workspace of workspaces) {
+        void savePersistedWorkspace(workspace).catch(() => {
+          // Vite preview and private browser mode intentionally have no native database.
+        });
+      }
+    }, 450);
+    return () => window.clearTimeout(persistenceTimer);
+  }, [workspaces, workspacesHydrated]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -497,12 +699,18 @@ function App() {
     }
 
     const existingMessages = activeConversation?.messages ?? [];
-    const history: ChatMessage[] = existingMessages
-      .filter((message) => message.content.trim().length > 0)
-      .map((message) => ({
-        role: message.role,
-        content: message.content,
-      }));
+    const history: ChatMessage[] = [];
+    if (settings.system_prompt.trim()) {
+      history.push({ role: "system", content: settings.system_prompt.trim() });
+    }
+    history.push(
+      ...existingMessages
+        .filter((message) => message.content.trim().length > 0)
+        .map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+    );
     history.push({ role: "user", content: text });
 
     const conversationId = activeConversation?.id ?? createId("conversation");
@@ -616,21 +824,26 @@ function App() {
   const handleCheckConnection = async () => {
     setModelsLoading(true);
     setConnectionMessage(null);
+    setProviderDiagnostics(null);
     setModelOptions([]);
     try {
-      const models = await listProviderModels({
+      const diagnostics = await inspectProvider({
         base_url: settings.base_url.trim(),
         model: settings.model.trim() || "default",
         api_key: settings.api_key.trim() || undefined,
       });
-      setModelOptions(models);
-      if (!settings.model.trim() && models[0]) {
-        setSettings((current) => ({ ...current, model: models[0].id }));
+      setProviderDiagnostics(diagnostics);
+      setModelOptions(diagnostics.models);
+      if (!diagnostics.error && !settings.model.trim() && diagnostics.models[0]) {
+        setSettings((current) => ({ ...current, model: diagnostics.models[0].id }));
       }
       setConnectionMessage(
-        models.length === 0
-          ? tx("connectedNoModels")
-          : tx("modelsAvailable", { count: models.length }),
+        diagnostics.error
+          ? diagnostics.error +
+            (diagnostics.retryable ? " · " + tx("retryable") : "")
+          : diagnostics.models.length === 0
+            ? tx("connectedNoModels")
+            : tx("modelsAvailable", { count: diagnostics.models.length }),
       );
     } catch (connectionError) {
       setConnectionMessage(errorMessage(connectionError));
@@ -659,6 +872,127 @@ function App() {
         setActiveConversationId(next[0]?.id ?? null);
       }
       return next;
+    });
+    void deletePersistedConversation(conversationId).catch(() => {
+      // Local storage remains the fallback when the native shell is unavailable.
+    });
+  };
+
+  const handleRenameConversation = () => {
+    if (!activeConversation) {
+      return;
+    }
+    const value = window.prompt(tx("renameConversationPrompt"), activeConversation.title);
+    if (value === null) {
+      return;
+    }
+    const title = value.trim().slice(0, 160);
+    if (!title) {
+      return;
+    }
+    updateConversation(activeConversation.id, (conversation) => ({
+      ...conversation,
+      title,
+      updatedAt: Date.now(),
+    }));
+  };
+
+  const handleExportConversation = () => {
+    if (!activeConversation || activeConversation.messages.length === 0) {
+      return;
+    }
+    const markdown = [
+      "# " + activeConversation.title,
+      "",
+      ...activeConversation.messages.flatMap((message) => [
+        "## " + (message.role === "user" ? tx("you") : tx("appName")),
+        "",
+        message.content,
+        message.reasoning
+          ? "\n> " + tx("reasoningTrace") + ": " + message.reasoning.replace(/\n/g, "\n> ")
+          : "",
+        "",
+      ]),
+    ].join("\n");
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = safeExportName(activeConversation.title) + ".md";
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  const handleValidateWorkspace = async () => {
+    setWorkspaceBusy(true);
+    setWorkspaceMessage(null);
+    try {
+      const diagnostics = await validateWorkspacePath(workspacePath.trim());
+      setWorkspaceDiagnostics(diagnostics);
+      setWorkspaceMessage(
+        diagnostics.exists && diagnostics.isDirectory
+          ? tx("workspacePathReady")
+          : tx("workspacePathInvalid"),
+      );
+    } catch {
+      setWorkspaceDiagnostics(null);
+      setWorkspaceMessage(tx("coreNotConnected"));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  const handleAddWorkspace = async () => {
+    const path = workspacePath.trim();
+    if (!path) {
+      setWorkspaceMessage(tx("workspacePathRequired"));
+      return;
+    }
+    setWorkspaceBusy(true);
+    setWorkspaceMessage(null);
+    try {
+      const diagnostics = await validateWorkspacePath(path);
+      setWorkspaceDiagnostics(diagnostics);
+      if (!diagnostics.exists || !diagnostics.isDirectory) {
+        setWorkspaceMessage(tx("workspacePathInvalid"));
+        return;
+      }
+      const canonicalPath = diagnostics.canonicalPath ?? path;
+      const pathParts = canonicalPath.split(/[\\/]/).filter(Boolean);
+      const fallbackName = pathParts[pathParts.length - 1] ?? tx("workspaceDefaultName");
+      const now = Date.now();
+      const workspace: Workspace = {
+        id: createId("workspace"),
+        name: (workspaceName.trim() || fallbackName).slice(0, 128),
+        rootPath: canonicalPath,
+        createdAt: now,
+        updatedAt: now,
+      };
+      setWorkspaces((current) => [
+        workspace,
+        ...current.filter((item) => item.rootPath !== workspace.rootPath),
+      ]);
+      void savePersistedWorkspace(workspace).catch(() => {
+        // The local fallback remains available in preview mode.
+      });
+      setWorkspaceName("");
+      setWorkspacePath("");
+      setWorkspaceDiagnostics(null);
+      setWorkspaceMessage(tx("workspaceAdded"));
+    } catch {
+      setWorkspaceMessage(tx("coreNotConnected"));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  const handleDeleteWorkspace = (workspaceId: string) => {
+    if (!window.confirm(tx("deleteWorkspaceConfirm"))) {
+      return;
+    }
+    setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+    void deletePersistedWorkspace(workspaceId).catch(() => {
+      // Local storage remains the fallback when the native shell is unavailable.
     });
   };
 
@@ -772,119 +1106,340 @@ function App() {
     );
   };
 
-  const renderModels = () => (
-    <section className="settings-panel card">
-      <div className="settings-heading">
-        <div>
-          <div className="eyebrow">{tx("providerRouting")}</div>
-          <h2>{tx("connectModelTitle")}</h2>
+  const renderWorkspaces = () => (
+    <div className="workspaces-view">
+      <section className="settings-panel card workspace-form-card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">{tx("workspaceRegistry")}</div>
+            <h2>{tx("addWorkspaceTitle")}</h2>
+          </div>
+          <span className="pill pill-green">{tx("scopedAccess")}</span>
         </div>
-        <span className="pill pill-green">{tx("localFirst")}</span>
-      </div>
-      <p className="settings-intro">{tx("settingsIntro")}</p>
-
-      <div className="provider-presets" aria-label={tx("quickSetup")}>
-        <button type="button" onClick={() => applyProviderPreset("ollama")}>
-          <span className="preset-mark">O</span>
-          <span><strong>Ollama</strong><small>127.0.0.1:11434</small></span>
-        </button>
-        <button type="button" onClick={() => applyProviderPreset("lmstudio")}>
-          <span className="preset-mark">L</span>
-          <span><strong>LM Studio</strong><small>127.0.0.1:1234</small></span>
-        </button>
-      </div>
-
-      <div className="settings-grid">
-        <label>
-          <span>{tx("baseUrl")}</span>
-          <input
-            value={settings.base_url}
-            onChange={(event) =>
-              setSettings((current) => ({ ...current, base_url: event.target.value }))
+        <p className="settings-intro">{tx("workspaceIntro")}</p>
+        <div className="workspace-form">
+          <label>
+            <span>{tx("workspaceName")}</span>
+            <input
+              value={workspaceName}
+              onChange={(event) => setWorkspaceName(event.target.value)}
+              placeholder={tx("workspaceNamePlaceholder")}
+              maxLength={128}
+            />
+          </label>
+          <label className="workspace-path-field">
+            <span>{tx("workspacePath")}</span>
+            <input
+              value={workspacePath}
+              onChange={(event) => {
+                setWorkspacePath(event.target.value);
+                setWorkspaceDiagnostics(null);
+                setWorkspaceMessage(null);
+              }}
+              placeholder={tx("workspacePathPlaceholder")}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+        </div>
+        <div className="settings-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => void handleValidateWorkspace()}
+            disabled={workspaceBusy || !workspacePath.trim()}
+          >
+            {workspaceBusy ? tx("checking") : tx("validatePath")}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void handleAddWorkspace()}
+            disabled={workspaceBusy || !workspacePath.trim()}
+          >
+            {tx("addWorkspace")}
+          </button>
+          {workspaceMessage && (
+            <span
+              className={
+                "connection-message " +
+                (workspaceDiagnostics?.exists && workspaceDiagnostics.isDirectory
+                  ? "is-success"
+                  : "")
+              }
+              role="status"
+            >
+              {workspaceMessage}
+            </span>
+          )}
+        </div>
+        {workspaceDiagnostics && (
+          <div
+            className={
+              "path-diagnostics " +
+              (workspaceDiagnostics.exists && workspaceDiagnostics.isDirectory
+                ? "is-valid"
+                : "is-invalid")
             }
-            placeholder="http://127.0.0.1:11434/v1"
-            spellCheck={false}
-          />
-        </label>
-        <label>
-          <span>{tx("model")}</span>
-          <input
-            list="provider-models"
-            value={settings.model}
-            onChange={(event) =>
-              setSettings((current) => ({ ...current, model: event.target.value }))
-            }
-            placeholder="llama3.2"
-            spellCheck={false}
-          />
-          <datalist id="provider-models">
-            {modelOptions.map((model) => <option key={model.id} value={model.id} />)}
-          </datalist>
-        </label>
-        <label>
-          <span>{tx("apiKey")} <em>{tx("optional")}</em></span>
-          <input
-            type="password"
-            value={settings.api_key}
-            onChange={(event) =>
-              setSettings((current) => ({ ...current, api_key: event.target.value }))
-            }
-            placeholder={tx("remoteProvidersOnly")}
-            autoComplete="off"
-          />
-        </label>
-        <label>
-          <span>{tx("maxNewTokens")}</span>
-          <input
-            type="number"
-            min={1}
-            max={131072}
-            value={settings.max_tokens}
-            onChange={(event) =>
-              setSettings((current) => ({
-                ...current,
-                max_tokens: Math.min(131072, Math.max(1, Number(event.target.value) || 1)),
-              }))
-            }
-          />
-        </label>
-        <label>
-          <span>{tx("temperature")}</span>
-          <input
-            type="number"
-            min={0}
-            max={2}
-            step={0.1}
-            value={settings.temperature}
-            onChange={(event) =>
-              setSettings((current) => ({
-                ...current,
-                temperature: Math.min(2, Math.max(0, Number(event.target.value) || 0)),
-              }))
-            }
-          />
-        </label>
-      </div>
-      <div className="settings-actions">
-        <button
-          className="primary-button"
-          type="button"
-          onClick={() => void handleCheckConnection()}
-          disabled={modelsLoading || !settings.base_url.trim()}
-        >
-          {modelsLoading ? tx("checking") : tx("checkConnection")}
-        </button>
-        {connectionMessage && (
-          <span className="connection-message" role="status">{connectionMessage}</span>
+          >
+            <span className="status-dot" />
+            <div>
+              <strong>
+                {workspaceDiagnostics.exists && workspaceDiagnostics.isDirectory
+                  ? tx("directoryReady")
+                  : tx("directoryUnavailable")}
+              </strong>
+              <small>
+                {workspaceDiagnostics.canonicalPath ??
+                  workspaceDiagnostics.error ??
+                  tx("directoryUnavailable")}
+              </small>
+            </div>
+          </div>
         )}
-      </div>
-      <div className="provider-help">
-        <strong>{tx("privacyFirst")}</strong>
-        <span>{tx("providerHelp")}</span>
-      </div>
-    </section>
+        <div className="provider-help workspace-boundary-note">
+          <strong>{tx("workspaceSafetyTitle")}</strong>
+          <span>{tx("workspaceSafetyDescription")}</span>
+        </div>
+      </section>
+
+      <section className="card workspace-list-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("registeredWorkspaces")}</span>
+            <small className="card-caption">{tx("workspaceCount", { count: workspaces.length })}</small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("storedLocally")}</span>
+        </div>
+        {workspaces.length === 0 ? (
+          <div className="workspace-empty">
+            <div className="empty-view-icon" aria-hidden="true">⌁</div>
+            <strong>{tx("noWorkspaces")}</strong>
+            <p>{tx("noWorkspacesDescription")}</p>
+          </div>
+        ) : (
+          <div className="workspace-list">
+            {workspaces.map((workspace) => (
+              <article className="workspace-row" key={workspace.id}>
+                <div className="workspace-row-icon" aria-hidden="true">⌁</div>
+                <div className="workspace-row-copy">
+                  <strong>{workspace.name}</strong>
+                  <code>{workspace.rootPath}</code>
+                  <small>
+                    {tx("workspaceAddedAt", {
+                      date: new Date(workspace.updatedAt).toLocaleDateString(localeTag),
+                    })}
+                  </small>
+                </div>
+                <button
+                  className="conversation-delete"
+                  type="button"
+                  onClick={() => handleDeleteWorkspace(workspace.id)}
+                  aria-label={tx("deleteWorkspace")}
+                  title={tx("deleteWorkspace")}
+                >
+                  ×
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
   );
 
+  const renderModels = () => (
+    <div className="models-view">
+      <section className="settings-panel card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">{tx("providerRouting")}</div>
+            <h2>{tx("connectModelTitle")}</h2>
+          </div>
+          <span className="pill pill-green">{tx("localFirst")}</span>
+        </div>
+        <p className="settings-intro">{tx("settingsIntro")}</p>
+
+        <div className="provider-presets" aria-label={tx("quickSetup")}>
+          <button type="button" onClick={() => applyProviderPreset("ollama")}>
+            <span className="preset-mark">O</span>
+            <span><strong>Ollama</strong><small>127.0.0.1:11434</small></span>
+          </button>
+          <button type="button" onClick={() => applyProviderPreset("lmstudio")}>
+            <span className="preset-mark">L</span>
+            <span><strong>LM Studio</strong><small>127.0.0.1:1234</small></span>
+          </button>
+        </div>
+
+        <div className="settings-grid">
+          <label>
+            <span>{tx("baseUrl")}</span>
+            <input
+              value={settings.base_url}
+              onChange={(event) =>
+                setSettings((current) => ({ ...current, base_url: event.target.value }))
+              }
+              placeholder="http://127.0.0.1:11434/v1"
+              spellCheck={false}
+            />
+          </label>
+          <label>
+            <span>{tx("model")}</span>
+            <input
+              list="provider-models"
+              value={settings.model}
+              onChange={(event) =>
+                setSettings((current) => ({ ...current, model: event.target.value }))
+              }
+              placeholder="llama3.2"
+              spellCheck={false}
+            />
+            <datalist id="provider-models">
+              {modelOptions.map((model) => <option key={model.id} value={model.id} />)}
+            </datalist>
+          </label>
+          <label>
+            <span>{tx("apiKey")} <em>{tx("optional")}</em></span>
+            <input
+              type="password"
+              value={settings.api_key}
+              onChange={(event) =>
+                setSettings((current) => ({ ...current, api_key: event.target.value }))
+              }
+              placeholder={tx("remoteProvidersOnly")}
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            <span>{tx("maxNewTokens")}</span>
+            <input
+              type="number"
+              min={1}
+              max={131072}
+              value={settings.max_tokens}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  max_tokens: Math.min(131072, Math.max(1, Number(event.target.value) || 1)),
+                }))
+              }
+            />
+          </label>
+          <label>
+            <span>{tx("temperature")}</span>
+            <input
+              type="number"
+              min={0}
+              max={2}
+              step={0.1}
+              value={settings.temperature}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  temperature: Math.min(2, Math.max(0, Number(event.target.value) || 0)),
+                }))
+              }
+            />
+          </label>
+          <label className="setting-wide">
+            <span>{tx("systemPrompt")} <em>{tx("optional")}</em></span>
+            <textarea
+              value={settings.system_prompt}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  system_prompt: event.target.value.slice(0, 16_384),
+                }))
+              }
+              placeholder={tx("systemPromptPlaceholder")}
+              rows={4}
+            />
+            <small>{tx("systemPromptHelp")}</small>
+          </label>
+        </div>
+        <div className="settings-actions">
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void handleCheckConnection()}
+            disabled={modelsLoading || !settings.base_url.trim()}
+          >
+            {modelsLoading ? tx("checking") : tx("checkConnection")}
+          </button>
+          {connectionMessage && (
+            <span className="connection-message" role="status">{connectionMessage}</span>
+          )}
+        </div>
+        <div className="provider-help">
+          <strong>{tx("privacyFirst")}</strong>
+          <span>{tx("providerHelp")}</span>
+        </div>
+      </section>
+
+      {providerDiagnostics && (
+        <section
+          className={
+            "provider-health card " +
+            (providerDiagnostics.status === "connected" ? "is-connected" : "is-error")
+          }
+        >
+          <div className="card-heading">
+            <div>
+              <span className="card-title">{tx("providerHealth")}</span>
+              <small className="card-caption">{providerDiagnostics.endpoint}</small>
+            </div>
+            <span className={"pill " + (providerDiagnostics.status === "connected" ? "pill-green" : "pill-red")}>
+              {providerDiagnostics.status === "connected" ? tx("connected") : tx("offline")}
+            </span>
+          </div>
+          <div className="health-stat-grid">
+            <div><strong>{Math.round(providerDiagnostics.latencyMs)} ms</strong><span>{tx("diagnosticLatency")}</span></div>
+            <div><strong>{providerDiagnostics.modelCount.toLocaleString(localeTag)}</strong><span>{tx("catalogModels")}</span></div>
+            <div><strong>{providerDiagnostics.local ? tx("localEndpoint") : tx("remoteEndpoint")}</strong><span>{tx("endpointClass")}</span></div>
+          </div>
+          {providerDiagnostics.error && (
+            <div className="runtime-error">
+              {providerDiagnostics.error}
+              {providerDiagnostics.retryable && <span> · {tx("retryable")}</span>}
+            </div>
+          )}
+        </section>
+      )}
+
+      <section className="model-catalog card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("availableModels")}</span>
+            <small className="card-caption">
+              {selectedProviderModel ? selectedProviderModel.id : tx("checkProviderForModels")}
+            </small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("providerCatalog")}</span>
+        </div>
+        {modelOptions.length === 0 ? (
+          <div className="catalog-empty">{tx("noProviderModels")}</div>
+        ) : (
+          <div className="model-catalog-grid">
+            {modelOptions.map((model) => (
+              <button
+                className={"model-catalog-item " + (settings.model === model.id ? "is-selected" : "")}
+                type="button"
+                key={model.id}
+                onClick={() => setSettings((current) => ({ ...current, model: model.id }))}
+              >
+                <span className="model-catalog-icon" aria-hidden="true">◈</span>
+                <span className="model-catalog-copy">
+                  <strong>{model.id}</strong>
+                  <small>{model.owned_by ?? tx("providerReported")}</small>
+                </span>
+                {settings.model === model.id && <span className="model-selected-mark">✓</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
   const renderRoadmap = () => (
     <section className="empty-view roadmap-view">
       <div className="empty-view-icon" aria-hidden="true">
@@ -1050,6 +1605,29 @@ function App() {
               )}
             </div>
             <div className="toolbar-actions">
+              {view === "chats" && activeConversation && (
+                <>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label={tx("renameConversation")}
+                    title={tx("renameConversation")}
+                    onClick={handleRenameConversation}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label={tx("exportConversation")}
+                    title={tx("exportConversation")}
+                    onClick={handleExportConversation}
+                    disabled={activeMessages.length === 0}
+                  >
+                    ⇩
+                  </button>
+                </>
+              )}
               <span className="model-chip" title={settings.base_url}>
                 <span className={"status-dot " + (coreReady ? "is-ready" : "")} />
                 {settings.model || tx("noModelSelected")}
@@ -1076,8 +1654,9 @@ function App() {
           </div>
 
           {view === "chats" && renderChat()}
+          {view === "workspaces" && renderWorkspaces()}
           {view === "models" && renderModels()}
-          {(view === "workspaces" || view === "automations") && renderRoadmap()}
+          {view === "automations" && renderRoadmap()}
 
           {view === "chats" && (
             <>
@@ -1159,6 +1738,17 @@ function App() {
             <div className="runtime-detail">
               {runtime.backend_name ?? tx("openAiCompatibleProvider")}
             </div>
+            {providerDiagnostics && (
+              <div className={"runtime-provider-status " + (providerDiagnostics.status === "connected" ? "is-connected" : "is-error")}>
+                <span className="status-dot" />
+                <span>
+                  {providerDiagnostics.status === "connected"
+                    ? tx("providerConnected")
+                    : tx("providerUnreachable")}
+                </span>
+                <small>{Math.round(providerDiagnostics.latencyMs)} ms</small>
+              </div>
+            )}
             {runtime.last_error && !coreReady && (
               <div className="runtime-error">{runtime.last_error}</div>
             )}
@@ -1216,6 +1806,7 @@ function App() {
       <footer className="statusbar">
         <span><span className="status-dot is-ready" /> {tx("localFirstMode")}</span>
         <span>{tx("permissionsStrict")}</span>
+        <span>{persistenceHydrated ? tx("databaseReady") : tx("databaseLoading")}</span>
         <span className="statusbar-spacer" />
         <span>{tx("apiKeySessionOnly")}</span>
       </footer>

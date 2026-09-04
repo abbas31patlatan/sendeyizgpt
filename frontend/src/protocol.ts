@@ -55,6 +55,57 @@ export const ProviderModelSchema = z.object({
 
 export type ProviderModel = z.infer<typeof ProviderModelSchema>;
 
+export const ProviderDiagnosticsSchema = z.object({
+  status: z.enum(["connected", "error"]),
+  endpoint: z.string().min(1),
+  local: z.boolean(),
+  latencyMs: z.number().nonnegative(),
+  modelCount: z.number().int().nonnegative(),
+  models: ProviderModelSchema.array(),
+  error: z.string().nullable(),
+  retryable: z.boolean(),
+});
+
+export type ProviderDiagnostics = z.infer<typeof ProviderDiagnosticsSchema>;
+
+export const PersistedMessageSchema = z.object({
+  id: z.string().min(1),
+  role: ChatRoleSchema,
+  content: z.string(),
+  reasoning: z.string().nullable().optional(),
+  createdAt: z.number().int().nonnegative(),
+});
+
+export type PersistedMessage = z.infer<typeof PersistedMessageSchema>;
+
+export const PersistedConversationSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  updatedAt: z.number().int().nonnegative(),
+  messages: PersistedMessageSchema.array(),
+});
+
+export type PersistedConversation = z.infer<typeof PersistedConversationSchema>;
+
+export const PersistedWorkspaceSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  rootPath: z.string().min(1),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+});
+
+export type PersistedWorkspace = z.infer<typeof PersistedWorkspaceSchema>;
+
+export const WorkspacePathDiagnosticsSchema = z.object({
+  exists: z.boolean(),
+  isDirectory: z.boolean(),
+  canonicalPath: z.string().nullable(),
+  error: z.string().nullable(),
+});
+
+export type WorkspacePathDiagnostics = z.infer<typeof WorkspacePathDiagnosticsSchema>;
+
 const OperationStartedSchema = z.object({
   operation_id: z.string().min(1),
 });

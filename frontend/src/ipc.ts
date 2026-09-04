@@ -3,13 +3,21 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ChatEventSchema,
   parseOperationStarted,
+  PersistedConversationSchema,
+  PersistedWorkspaceSchema,
+  ProviderDiagnosticsSchema,
   ProviderModelSchema,
   RuntimeStatusSchema,
+  WorkspacePathDiagnosticsSchema,
   type ChatEvent,
   type ChatRequest,
+  type PersistedConversation,
+  type PersistedWorkspace,
   type ProviderConfig,
+  type ProviderDiagnostics,
   type ProviderModel,
   type RuntimeStatus,
+  type WorkspacePathDiagnostics,
 } from "./protocol";
 
 export async function getRuntimeStatus(): Promise<RuntimeStatus> {
@@ -38,6 +46,51 @@ export async function listProviderModels(config: ProviderConfig): Promise<Provid
     },
   });
   return ProviderModelSchema.array().parse(raw);
+}
+
+export async function inspectProvider(config: ProviderConfig): Promise<ProviderDiagnostics> {
+  const raw = await invoke<unknown>("inspect_provider", {
+    config: {
+      ...config,
+      api_key: config.api_key?.trim() || undefined,
+    },
+  });
+  return ProviderDiagnosticsSchema.parse(raw);
+}
+
+export async function loadPersistedConversations(): Promise<PersistedConversation[]> {
+  const raw = await invoke<unknown>("load_conversations");
+  return PersistedConversationSchema.array().parse(raw);
+}
+
+export async function savePersistedConversation(
+  conversation: PersistedConversation,
+): Promise<void> {
+  await invoke("save_conversation", { conversation });
+}
+
+export async function deletePersistedConversation(conversationId: string): Promise<boolean> {
+  return invoke<boolean>("delete_conversation", { conversationId });
+}
+
+export async function loadPersistedWorkspaces(): Promise<PersistedWorkspace[]> {
+  const raw = await invoke<unknown>("load_workspaces");
+  return PersistedWorkspaceSchema.array().parse(raw);
+}
+
+export async function savePersistedWorkspace(workspace: PersistedWorkspace): Promise<void> {
+  await invoke("save_workspace", { workspace });
+}
+
+export async function deletePersistedWorkspace(workspaceId: string): Promise<boolean> {
+  return invoke<boolean>("delete_workspace", { workspaceId });
+}
+
+export async function validateWorkspacePath(
+  path: string,
+): Promise<WorkspacePathDiagnostics> {
+  const raw = await invoke<unknown>("validate_workspace_path", { path });
+  return WorkspacePathDiagnosticsSchema.parse(raw);
 }
 
 export async function listenChatEvents(
