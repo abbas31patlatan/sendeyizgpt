@@ -1,6 +1,6 @@
 # Aegis AI architecture
 
-Status: Milestone 0 foundation, version `0.1.0`.
+Status: Milestone 1a local-provider chat slice, version `0.1.0`.
 
 ## A. Product definition
 
@@ -376,6 +376,7 @@ policy, audit integrity and application availability.
 │   ├── database/                 # SQLite connection and migrations
 │   ├── inference/                # backend/model/profile contracts
 │   ├── ipc/                      # authenticated frame helpers
+│   ├── providers/                # OpenAI-compatible streaming adapters
 │   ├── permissions/              # trusted broker and path policy
 │   ├── protocol/                 # versioned wire primitives
 │   └── tools/                    # manifests, executor and untrusted output types
@@ -395,7 +396,8 @@ policy, audit integrity and application availability.
 | Milestone | Scope | Exit criteria |
 | --- | --- | --- |
 | M0 | Architecture, threat model, repo, CI shape, desktop shell, typed contracts, broker core | Shell builds; broker/database/protocol tests pass; no execution path exists |
-| M1 | Chat UI, SQLite repositories, settings, supervised llama.cpp worker, GGUF load and streaming | Small GGUF can load on CPU; stream/cancel/restart tested |
+| M1a | Chat UI, OpenAI-compatible local provider, typed streaming events, connection diagnostics and session settings | Ollama/LM Studio-compatible endpoint can stream/cancel; provider, SSE and security tests pass |
+| M1b | SQLite conversation repositories, supervised llama.cpp worker, GGUF load and streaming | Small GGUF can load on CPU; stream/cancel/restart tested |
 | M2 | Model manager, library scan, GGUF metadata, Vulkan detection, offload, profiles and metrics | RX 5700 XT Vulkan profile is detected and estimates are visibly separate from actuals |
 | M3 | Tool runtime, broker UI, audit log, filesystem read, safe shell proposal | Approval is required for every side effect and is integration-tested |
 | M4 | Coding workspace, project search, diff/edit flow, Git state, bounded coding agent | Write/test actions require separate previews and approvals |
@@ -405,9 +407,9 @@ policy, audit integrity and application availability.
 | M8 | Event engine, weather/earthquake providers, scheduler and notifications | Sources/update times visible; automations are inspectable and cancellable |
 | M9 | Plugin SDK, WASM/process host, routing, custom architectures, signed runtime updates | Compatibility and sandbox policy tested across plugin versions |
 
-M0 is the first implemented source foundation in this workspace. M1 is the
-next implementation target; it is intentionally not marked complete by a UI
-mock.
+M0 is the implemented source foundation. M1a is the first implemented product
+slice: it exercises a real OpenAI-compatible provider end to end. M1b remains
+the next step for fully local llama.cpp/GGUF inference and durable repositories.
 
 ## N. Highest technical risks
 
@@ -432,7 +434,7 @@ mock.
    VRAM/CPU. Scheduling and thermal telemetry must be explicit, not hidden
    background polling.
 
-## O. Milestone 0 files created
+## O. Implemented foundation and M1a files
 
 ### Workspace and documentation
 
@@ -450,6 +452,7 @@ mock.
 - `crates/permissions/src/lib.rs`
 - `crates/tools/src/lib.rs`
 - `crates/inference/src/lib.rs`
+- `crates/providers/src/lib.rs`
 - `crates/agent/src/lib.rs`
 - `crates/database/src/lib.rs`
 - `crates/database/migrations/0001_initial.sql`
@@ -467,5 +470,6 @@ mock.
 - `frontend/package.json`, `frontend/tsconfig.json`, `frontend/vite.config.ts`,
   `frontend/index.html`
 - `frontend/src/main.tsx`, `frontend/src/App.tsx`, `frontend/src/ipc.ts`,
-  `frontend/src/protocol.ts`, `frontend/src/styles.css`,
+  `frontend/src/protocol.ts`, `frontend/src/styles.css`, `frontend/src/chat.css`
+- `apps/desktop/src-tauri/icons/icon.ico`,
   `frontend/src/vite-env.d.ts`
