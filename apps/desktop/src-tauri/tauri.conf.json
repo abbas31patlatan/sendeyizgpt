@@ -38,6 +38,7 @@
   "bundle": {
     "active": true,
     "icon": ["icons/icon.ico"],
+    "resources": ["runtime/*"],
     "targets": ["msi", "nsis"],
     "windows": {
       "nsis": {
