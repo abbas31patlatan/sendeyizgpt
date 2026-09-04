@@ -10,6 +10,7 @@ import {
 import {
   cancelOperation,
   deleteModelLibrary,
+  getNativeRuntimeStatus,
   deletePersistedConversation,
   deletePersistedWorkspace,
   estimateModelLoad,
@@ -27,11 +28,14 @@ import {
   savePersistedWorkspace,
   scanModelLibrary,
   startChat,
+  startNativeModel,
   stopEverything,
+  stopNativeModel,
   validateWorkspacePath,
 } from "./ipc";
 import {
   formatBytes,
+  initialNativeRuntimeStatus,
   initialUnavailableStatus,
   type ChatEvent,
   type LoadPreset,
@@ -40,6 +44,8 @@ import {
   type ModelLoadEstimate,
   type ModelProfile,
   type ModelScanSummary,
+  type NativeRuntimePhase,
+  type NativeRuntimeStatus,
   type ChatMessage,
   type PersistedConversation,
   type PersistedWorkspace,
@@ -96,6 +102,7 @@ const CONVERSATIONS_KEY = "aegis.conversations.v1";
 const SETTINGS_KEY = "aegis.provider-settings.v1";
 const UI_PREFERENCES_KEY = "aegis.ui-preferences.v1";
 const WORKSPACES_KEY = "aegis.workspaces.v1";
+const NATIVE_RUNTIME_PATH_KEY = "aegis.native-runtime-path.v1";
 
 const navigation: Array<{ id: View; labelKey: TranslationKey; glyph: string }> = [
   { id: "chats", labelKey: "navChats", glyph: "◌" },
@@ -182,6 +189,15 @@ function loadSettings(): ProviderSettings {
     };
   } catch {
     return defaultSettings;
+  }
+}
+
+
+function loadNativeRuntimePath(): string {
+  try {
+    return (window.localStorage.getItem(NATIVE_RUNTIME_PATH_KEY) ?? "").slice(0, 4096);
+  } catch {
+    return "";
   }
 }
 
@@ -290,6 +306,25 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+
+function nativeRuntimePhaseKey(phase: NativeRuntimePhase): TranslationKey {
+  switch (phase) {
+    case "starting":
+      return "nativeRuntimePhaseStarting";
+    case "loading":
+      return "nativeRuntimePhaseLoading";
+    case "ready":
+      return "nativeRuntimePhaseReady";
+    case "stopping":
+      return "nativeRuntimePhaseStopping";
+    case "error":
+      return "nativeRuntimePhaseError";
+    case "stopped":
+    default:
+      return "nativeRuntimePhaseStopped";
+  }
+}
+
 function formatParameterCount(value: number | null, localeTag: string): string {
   if (value === null) {
     return "—";
@@ -351,6 +386,12 @@ function App() {
   const [loadPreset, setLoadPreset] = useState<LoadPreset>("balanced");
   const [loadEstimate, setLoadEstimate] = useState<ModelLoadEstimate | null>(null);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [nativeRuntime, setNativeRuntime] = useState<NativeRuntimeStatus>(
+    initialNativeRuntimeStatus,
+  );
+  const [nativeRuntimePath, setNativeRuntimePath] = useState(loadNativeRuntimePath);
+  const [nativeRuntimeBusy, setNativeRuntimeBusy] = useState(false);
+  const [nativeRuntimeMessage, setNativeRuntimeMessage] = useState<string | null>(null);
   const [persistenceHydrated, setPersistenceHydrated] = useState(false);
   const [workspacesHydrated, setWorkspacesHydrated] = useState(false);
   const [draft, setDraft] = useState("");
@@ -405,10 +446,19 @@ function App() {
   );
 
   const refreshRuntime = useCallback(async () => {
-    try {
-      setRuntime(await getRuntimeStatus());
-    } catch {
+    const [coreResult, nativeResult] = await Promise.allSettled([
+      getRuntimeStatus(),
+      getNativeRuntimeStatus(),
+    ]);
+    if (coreResult.status === "fulfilled") {
+      setRuntime(coreResult.value);
+    } else {
       setRuntime(initialUnavailableStatus);
+    }
+    if (nativeResult.status === "fulfilled") {
+      setNativeRuntime(nativeResult.value);
+    } else {
+      setNativeRuntime(initialNativeRuntimeStatus);
     }
   }, []);
 
@@ -561,6 +611,7 @@ function App() {
 
   useEffect(() => {
     void refreshRuntime();
+    const runtimeTimer = window.setInterval(() => void refreshRuntime(), 3000);
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listenChatEvents(onChatEvent).then((stopListening) => {
@@ -574,6 +625,7 @@ function App() {
     });
     return () => {
       disposed = true;
+      window.clearInterval(runtimeTimer);
       unlisten?.();
     };
   }, [onChatEvent, refreshRuntime]);
@@ -692,13 +744,17 @@ function App() {
         };
         window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(nonSecretSettings));
         window.localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
+        window.localStorage.setItem(
+          NATIVE_RUNTIME_PATH_KEY,
+          nativeRuntimePath.trim().slice(0, 4096),
+        );
         window.localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
       } catch {
         // Persistence is best effort; the chat remains usable in private browsing.
       }
     }, 300);
     return () => window.clearTimeout(persistenceTimer);
-  }, [conversations, settings, uiPreferences, workspaces]);
+  }, [conversations, nativeRuntimePath, settings, uiPreferences, workspaces]);
 
   useEffect(() => {
     if (!persistenceHydrated || isStreaming) {
@@ -1085,6 +1141,56 @@ function App() {
       setProfileMessage(tx("profileSaved"));
     } catch (saveError) {
       setProfileMessage(errorMessage(saveError));
+    }
+  };
+
+
+  const handleStartNativeModel = async () => {
+    if (!selectedLocalModel || !loadEstimate || nativeRuntimeBusy) {
+      return;
+    }
+    setNativeRuntimeBusy(true);
+    setNativeRuntimeMessage(null);
+    try {
+      const status = await startNativeModel({
+        modelId: selectedLocalModel.id,
+        preset: loadPreset,
+        runtimePath: nativeRuntimePath.trim() || undefined,
+      });
+      setNativeRuntime(status);
+      if (status.endpoint) {
+        setSettings((current) => ({
+          ...current,
+          base_url: status.endpoint!.replace(/\/+$/, "") + "/v1",
+          model: status.modelId ?? selectedLocalModel.id,
+          api_key: "",
+        }));
+        setModelOptions([]);
+        setProviderDiagnostics(null);
+        setConnectionMessage(null);
+      }
+      setNativeRuntimeMessage(tx("nativeModelReady"));
+    } catch (startError) {
+      setNativeRuntimeMessage(errorMessage(startError));
+    } finally {
+      setNativeRuntimeBusy(false);
+    }
+  };
+
+  const handleStopNativeModel = async () => {
+    if (nativeRuntime.phase === "stopped" || nativeRuntime.phase === "stopping") {
+      return;
+    }
+    setNativeRuntimeBusy(true);
+    setNativeRuntimeMessage(null);
+    try {
+      const status = await stopNativeModel();
+      setNativeRuntime(status);
+      setNativeRuntimeMessage(tx("nativeRuntimeStopped"));
+    } catch (stopError) {
+      setNativeRuntimeMessage(errorMessage(stopError));
+    } finally {
+      setNativeRuntimeBusy(false);
     }
   };
 
@@ -1976,6 +2082,109 @@ function App() {
               {profileMessage ?? tx("estimateLoading")}
             </div>
           )}
+
+          <div className="native-runtime-panel">
+            <div className="native-runtime-heading">
+              <div>
+                <span className="card-title">{tx("nativeRuntime")}</span>
+                <small className="card-caption">{tx("nativeRuntimeDescription")}</small>
+              </div>
+              <span
+                className={
+                  "pill " +
+                  (nativeRuntime.phase === "ready"
+                    ? "pill-green"
+                    : nativeRuntime.phase === "error"
+                      ? "pill-red"
+                      : "pill-blue")
+                }
+              >
+                {tx(nativeRuntimePhaseKey(nativeRuntime.phase))}
+              </span>
+            </div>
+            <p className="settings-intro">{tx("nativeRuntimeDescription")}</p>
+            <label className="native-runtime-path-field">
+              <span>{tx("nativeRuntimePath")}</span>
+              <input
+                value={nativeRuntimePath}
+                onChange={(event) => setNativeRuntimePath(event.target.value.slice(0, 4096))}
+                placeholder={tx("nativeRuntimePathPlaceholder")}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={
+                  nativeRuntimeBusy ||
+                  nativeRuntime.phase === "starting" ||
+                  nativeRuntime.phase === "loading" ||
+                  nativeRuntime.phase === "ready"
+                }
+              />
+            </label>
+            <div className="native-runtime-actions">
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void handleStartNativeModel()}
+                disabled={
+                  !loadEstimate ||
+                  nativeRuntimeBusy ||
+                  nativeRuntime.phase === "starting" ||
+                  nativeRuntime.phase === "loading" ||
+                  nativeRuntime.phase === "ready"
+                }
+              >
+                {nativeRuntimeBusy &&
+                (nativeRuntime.phase === "starting" || nativeRuntime.phase === "loading")
+                  ? tx("loadingNativeModel")
+                  : tx("loadNativeModel")}
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => void handleStopNativeModel()}
+                disabled={
+                  nativeRuntime.phase === "stopped" ||
+                  nativeRuntime.phase === "stopping"
+                }
+              >
+                {tx("unloadNativeModel")}
+              </button>
+              <span className="native-runtime-phase" role="status">
+                <span
+                  className={
+                    "status-dot " +
+                    (nativeRuntime.phase === "ready"
+                      ? "is-ready"
+                      : nativeRuntime.phase === "error"
+                        ? "is-error"
+                        : "")
+                  }
+                />
+                {tx(nativeRuntimePhaseKey(nativeRuntime.phase))}
+              </span>
+            </div>
+            {nativeRuntime.endpoint && (
+              <div className="native-runtime-detail">
+                <span>{tx("nativeRuntimeEndpoint")}</span>
+                <code>{nativeRuntime.endpoint}/v1</code>
+              </div>
+            )}
+            {nativeRuntime.executablePath && (
+              <div className="native-runtime-detail">
+                <span>{tx("nativeRuntimeExecutable")}</span>
+                <code>{nativeRuntime.executablePath}</code>
+              </div>
+            )}
+            {(nativeRuntimeMessage || nativeRuntime.message) && (
+              <div
+                className={
+                  "runtime-error " +
+                  (nativeRuntime.phase === "ready" ? "native-runtime-success" : "")
+                }
+              >
+                {nativeRuntimeMessage ?? nativeRuntime.message}
+              </div>
+            )}
+          </div>
         </section>
       )}
     </div>

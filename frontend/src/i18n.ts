@@ -222,6 +222,26 @@ const en = {
   estimateVram: "estimated VRAM",
   estimateRam: "estimated RAM",
   estimateConfidence: "confidence",
+  nativeRuntime: "Native llama.cpp runtime",
+  nativeRuntimePath: "llama-server executable (optional)",
+  nativeRuntimePathPlaceholder: "Bundled runtime or llama-server.exe on PATH",
+  nativeRuntimeDescription:
+    "Load this GGUF with a real native llama.cpp process. Aegis verifies the file fingerprint, keeps the server on loopback and waits for /health before enabling chat.",
+  loadNativeModel: "Load tensors",
+  loadingNativeModel: "Loading tensors…",
+  nativeModelReady: "GGUF tensors loaded. Chat is routed to native llama.cpp.",
+  unloadNativeModel: "Unload model",
+  nativeRuntimeStopped: "Native runtime stopped.",
+  nativeRuntimeEndpoint: "OpenAI-compatible endpoint",
+  nativeRuntimeExecutable: "Executable",
+  nativeRuntimePhaseStopped: "Stopped",
+  nativeRuntimePhaseStarting: "Starting",
+  nativeRuntimePhaseLoading: "Loading GGUF tensors",
+  nativeRuntimePhaseReady: "Ready",
+  nativeRuntimePhaseStopping: "Stopping",
+  nativeRuntimePhaseError: "Runtime error",
+  nativeRuntimeMissing:
+    "llama-server was not found. Install the bundled package or choose its executable path.",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -448,6 +468,26 @@ const tr: Record<TranslationKey, string> = {
   estimateVram: "tahmini VRAM",
   estimateRam: "tahmini RAM",
   estimateConfidence: "güven",
+  nativeRuntime: "Yerel llama.cpp çalışma zamanı",
+  nativeRuntimePath: "llama-server çalıştırılabilir dosyası (isteğe bağlı)",
+  nativeRuntimePathPlaceholder: "Paketlenmiş çalışma zamanı veya PATH üzerindeki llama-server.exe",
+  nativeRuntimeDescription:
+    "Bu GGUF'u gerçek bir yerel llama.cpp süreciyle yükle. Aegis dosya parmak izini doğrular, sunucuyu loopback'te tutar ve sohbeti açmadan önce /health yanıtını bekler.",
+  loadNativeModel: "Tensor'ları yükle",
+  loadingNativeModel: "Tensor'lar yükleniyor…",
+  nativeModelReady: "GGUF tensor'ları yüklendi. Sohbet yerel llama.cpp'ye yönlendirildi.",
+  unloadNativeModel: "Modeli kaldır",
+  nativeRuntimeStopped: "Yerel çalışma zamanı durduruldu.",
+  nativeRuntimeEndpoint: "OpenAI uyumlu uç nokta",
+  nativeRuntimeExecutable: "Çalıştırılabilir dosya",
+  nativeRuntimePhaseStopped: "Durduruldu",
+  nativeRuntimePhaseStarting: "Başlatılıyor",
+  nativeRuntimePhaseLoading: "GGUF tensor'ları yükleniyor",
+  nativeRuntimePhaseReady: "Hazır",
+  nativeRuntimePhaseStopping: "Durduruluyor",
+  nativeRuntimePhaseError: "Çalışma zamanı hatası",
+  nativeRuntimeMissing:
+    "llama-server bulunamadı. Paketlenmiş sürümü kur veya çalıştırılabilir dosyanın yolunu seç.",
 };
 
 export function translate(
