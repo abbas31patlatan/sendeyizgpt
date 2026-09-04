@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   cancelOperation,
+  deleteAutomation,
   deleteModelLibrary,
   getNativeRuntimeStatus,
   deletePersistedConversation,
@@ -17,11 +18,13 @@ import {
   getRuntimeStatus,
   inspectProvider,
   listenChatEvents,
+  loadAutomations,
   loadLocalModels,
   loadModelLibraries,
   loadModelProfiles,
   loadPersistedConversations,
   loadPersistedWorkspaces,
+  saveAutomation,
   saveModelLibrary,
   saveModelProfile,
   savePersistedConversation,
@@ -37,6 +40,8 @@ import {
   formatBytes,
   initialNativeRuntimeStatus,
   initialUnavailableStatus,
+  type Automation,
+  type AutomationStatus,
   type ChatEvent,
   type LoadPreset,
   type LocalModel,
@@ -96,6 +101,7 @@ type UiPreferences = {
 type ChatBinding = {
   conversationId: string;
   assistantId: string;
+  automationId?: string;
 };
 
 const CONVERSATIONS_KEY = "aegis.conversations.v1";
@@ -103,6 +109,7 @@ const SETTINGS_KEY = "aegis.provider-settings.v1";
 const UI_PREFERENCES_KEY = "aegis.ui-preferences.v1";
 const WORKSPACES_KEY = "aegis.workspaces.v1";
 const NATIVE_RUNTIME_PATH_KEY = "aegis.native-runtime-path.v1";
+const AUTOMATIONS_KEY = "aegis.automations.v1";
 
 const navigation: Array<{ id: View; labelKey: TranslationKey; glyph: string }> = [
   { id: "chats", labelKey: "navChats", glyph: "◌" },
@@ -236,6 +243,53 @@ function isWorkspace(value: unknown): value is Workspace {
   );
 }
 
+function isAutomation(value: unknown): value is Automation {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<Automation>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    typeof candidate.prompt === "string" &&
+    typeof candidate.intervalMinutes === "number" &&
+    typeof candidate.enabled === "boolean" &&
+    (typeof candidate.lastRunAt === "number" || candidate.lastRunAt === null) &&
+    (typeof candidate.nextRunAt === "number" || candidate.nextRunAt === null) &&
+    typeof candidate.lastStatus === "string" &&
+    (typeof candidate.lastError === "string" || candidate.lastError === null) &&
+    (typeof candidate.lastConversationId === "string" || candidate.lastConversationId === null) &&
+    typeof candidate.createdAt === "number" &&
+    typeof candidate.updatedAt === "number"
+  );
+}
+
+function normalizeAutomation(automation: Automation): Automation {
+  const intervalMinutes = Math.min(10080, Math.max(1, Math.floor(automation.intervalMinutes)));
+  return {
+    ...automation,
+    intervalMinutes,
+    nextRunAt: automation.enabled
+      ? automation.nextRunAt ?? automation.updatedAt + intervalMinutes * 60_000
+      : null,
+  };
+}
+
+function loadLocalAutomations(): Automation[] {
+  try {
+    const raw = window.localStorage.getItem(AUTOMATIONS_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter(isAutomation).map(normalizeAutomation)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function loadLocalWorkspaces(): Workspace[] {
   try {
     const raw = window.localStorage.getItem(WORKSPACES_KEY);
@@ -307,6 +361,22 @@ function errorMessage(error: unknown): string {
 }
 
 
+function automationStatusKey(status: AutomationStatus): TranslationKey {
+  switch (status) {
+    case "running":
+      return "automationStatusRunning";
+    case "success":
+      return "automationStatusSuccess";
+    case "error":
+      return "automationStatusError";
+    case "cancelled":
+      return "automationStatusCancelled";
+    case "idle":
+    default:
+      return "automationStatusIdle";
+  }
+}
+
 function nativeRuntimePhaseKey(phase: NativeRuntimePhase): TranslationKey {
   switch (phase) {
     case "starting":
@@ -377,6 +447,13 @@ function App() {
   const [settings, setSettings] = useState<ProviderSettings>(loadSettings);
   const [uiPreferences, setUiPreferences] = useState<UiPreferences>(loadUiPreferences);
   const [workspaces, setWorkspaces] = useState<Workspace[]>(loadLocalWorkspaces);
+  const [automations, setAutomations] = useState<Automation[]>(loadLocalAutomations);
+  const [automationName, setAutomationName] = useState("");
+  const [automationPrompt, setAutomationPrompt] = useState("");
+  const [automationIntervalMinutes, setAutomationIntervalMinutes] = useState(60);
+  const [automationEnabledOnCreate, setAutomationEnabledOnCreate] = useState(false);
+  const [automationMessage, setAutomationMessage] = useState<string | null>(null);
+  const [automationBusy, setAutomationBusy] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceDiagnostics, setWorkspaceDiagnostics] =
@@ -405,6 +482,7 @@ function App() {
   const [nativeRuntimeMessage, setNativeRuntimeMessage] = useState<string | null>(null);
   const [persistenceHydrated, setPersistenceHydrated] = useState(false);
   const [workspacesHydrated, setWorkspacesHydrated] = useState(false);
+  const [automationsHydrated, setAutomationsHydrated] = useState(false);
   const [draft, setDraft] = useState("");
   const [conversationQuery, setConversationQuery] = useState("");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
@@ -417,6 +495,7 @@ function App() {
     useState<ProviderDiagnostics | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
   const operationBindings = useRef(new Map<string, ChatBinding>());
+  const automationOperations = useRef(new Map<string, string>());
   const queuedEvents = useRef(new Map<string, ChatEvent[]>());
   const streamDeltas = useRef(
     new Map<string, { content: string; reasoning: string }>(),
@@ -482,6 +561,47 @@ function App() {
       );
     },
     [],
+  );
+
+  const updateAutomation = useCallback(
+    (automationId: string, updater: (automation: Automation) => Automation) => {
+      setAutomations((current) =>
+        current.map((automation) =>
+          automation.id === automationId ? updater(automation) : automation,
+        ),
+      );
+    },
+    [],
+  );
+
+  const markAutomationStarted = useCallback(
+    (automationId: string, conversationId: string) => {
+      const startedAt = Date.now();
+      updateAutomation(automationId, (automation) => ({
+        ...automation,
+        lastRunAt: startedAt,
+        nextRunAt: automation.enabled
+          ? startedAt + automation.intervalMinutes * 60_000
+          : null,
+        lastStatus: "running",
+        lastError: null,
+        lastConversationId: conversationId,
+        updatedAt: startedAt,
+      }));
+    },
+    [updateAutomation],
+  );
+
+  const markAutomationFinished = useCallback(
+    (automationId: string, status: AutomationStatus, lastError: string | null = null) => {
+      updateAutomation(automationId, (automation) => ({
+        ...automation,
+        lastStatus: status,
+        lastError,
+        updatedAt: Date.now(),
+      }));
+    },
+    [updateAutomation],
   );
 
   const flushStreamDeltas = useCallback(() => {
@@ -561,7 +681,9 @@ function App() {
       flushStreamDeltas();
 
       if (event.type === "failed") {
-        setError(event.message);
+        if (!binding.automationId) {
+          setError(event.message);
+        }
         updateConversation(binding.conversationId, (conversation) =>
           updateStoredMessage(conversation, binding.assistantId, (message) => ({
             ...message,
@@ -592,6 +714,18 @@ function App() {
         event.type === "failed" ||
         event.type === "cancelled"
       ) {
+        if (binding.automationId) {
+          automationOperations.current.delete(binding.automationId);
+          markAutomationFinished(
+            binding.automationId,
+            event.type === "finished"
+              ? "success"
+              : event.type === "failed"
+                ? "error"
+                : "cancelled",
+            event.type === "failed" ? event.message : null,
+          );
+        }
         operationBindings.current.delete(event.operation_id);
         queuedEvents.current.delete(event.operation_id);
         setStreamingOperation((current) =>
@@ -599,7 +733,13 @@ function App() {
         );
       }
     },
-    [flushStreamDeltas, scheduleStreamFlush, tx, updateConversation],
+    [
+      flushStreamDeltas,
+      markAutomationFinished,
+      scheduleStreamFlush,
+      tx,
+      updateConversation,
+    ],
   );
 
   const onChatEvent = useCallback(
@@ -700,6 +840,41 @@ function App() {
 
   useEffect(() => {
     let disposed = false;
+    void loadAutomations()
+      .then((stored) => {
+        if (disposed) {
+          return;
+        }
+        if (stored.length > 0) {
+          setAutomations((current) => {
+            const byId = new Map(current.map((automation) => [automation.id, automation]));
+            for (const automation of stored.map(normalizeAutomation)) {
+              const currentAutomation = byId.get(automation.id);
+              if (!currentAutomation || automation.updatedAt >= currentAutomation.updatedAt) {
+                byId.set(automation.id, automation);
+              }
+            }
+            return [...byId.values()].sort(
+              (left, right) =>
+                Number(right.enabled) - Number(left.enabled) ||
+                right.updatedAt - left.updatedAt,
+            );
+          });
+        }
+        setAutomationsHydrated(true);
+      })
+      .catch(() => {
+        if (!disposed) {
+          setAutomationsHydrated(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
     void Promise.all([loadModelLibraries(), loadLocalModels(), loadModelProfiles()])
       .then(([libraries, models, profiles]) => {
         if (disposed) {
@@ -755,6 +930,7 @@ function App() {
         };
         window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(nonSecretSettings));
         window.localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
+        window.localStorage.setItem(AUTOMATIONS_KEY, JSON.stringify(automations));
         window.localStorage.setItem(
           NATIVE_RUNTIME_PATH_KEY,
           nativeRuntimePath.trim().slice(0, 4096),
@@ -765,7 +941,14 @@ function App() {
       }
     }, 300);
     return () => window.clearTimeout(persistenceTimer);
-  }, [conversations, nativeRuntimePath, settings, uiPreferences, workspaces]);
+  }, [
+    automations,
+    conversations,
+    nativeRuntimePath,
+    settings,
+    uiPreferences,
+    workspaces,
+  ]);
 
   useEffect(() => {
     if (!persistenceHydrated || isStreaming) {
@@ -794,6 +977,20 @@ function App() {
     }, 450);
     return () => window.clearTimeout(persistenceTimer);
   }, [workspaces, workspacesHydrated]);
+
+  useEffect(() => {
+    if (!automationsHydrated) {
+      return;
+    }
+    const persistenceTimer = window.setTimeout(() => {
+      for (const automation of automations) {
+        void saveAutomation(automation).catch(() => {
+          // Local storage remains the fallback in preview mode.
+        });
+      }
+    }, 450);
+    return () => window.clearTimeout(persistenceTimer);
+  }, [automations, automationsHydrated]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -953,6 +1150,139 @@ function App() {
       );
     }
   };
+
+  const runAutomation = useCallback(
+    async (automationId: string, automatic = false): Promise<boolean> => {
+      const automation = automations.find((item) => item.id === automationId);
+      if (!automation || automationOperations.current.has(automationId)) {
+        return false;
+      }
+      if (isStreaming) {
+        if (!automatic) {
+          setAutomationMessage(tx("automationGenerationBusy"));
+        }
+        return false;
+      }
+
+      const provider: ProviderConfig = {
+        base_url: settings.base_url.trim(),
+        model: settings.model.trim(),
+        api_key: settings.api_key.trim() || undefined,
+      };
+      if (!provider.base_url || !provider.model) {
+        if (!automatic) {
+          setAutomationMessage(tx("automationProviderRequired"));
+        }
+        return false;
+      }
+
+      const now = Date.now();
+      const conversationId = createId("conversation");
+      const userMessage: StoredMessage = {
+        id: createId("message"),
+        role: "user",
+        content: automation.prompt,
+        createdAt: now,
+      };
+      const assistantId = createId("message");
+      const assistantMessage: StoredMessage = {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        createdAt: now + 1,
+        status: "streaming",
+      };
+      const conversation: Conversation = {
+        id: conversationId,
+        title: tx("automationConversationTitle", { name: automation.name }),
+        messages: [userMessage, assistantMessage],
+        updatedAt: now,
+      };
+      const history: ChatMessage[] = [];
+      if (settings.system_prompt.trim()) {
+        history.push({ role: "system", content: settings.system_prompt.trim() });
+      }
+      history.push({ role: "user", content: automation.prompt });
+
+      setConversations((current) => [conversation, ...current]);
+      if (!automatic) {
+        setActiveConversationId(conversationId);
+        setView("chats");
+        setAutomationMessage(tx("automationRunStarted"));
+      }
+      setError(null);
+      markAutomationStarted(automationId, conversationId);
+
+      try {
+        const started = await startChat({
+          provider,
+          messages: history,
+          max_tokens: settings.max_tokens,
+          temperature: settings.temperature,
+        });
+        automationOperations.current.set(automationId, started.operation_id);
+        const binding: ChatBinding = {
+          conversationId,
+          assistantId,
+          automationId,
+        };
+        operationBindings.current.set(started.operation_id, binding);
+        setStreamingOperation(started.operation_id);
+        const pending = queuedEvents.current.get(started.operation_id) ?? [];
+        queuedEvents.current.delete(started.operation_id);
+        for (const event of pending) {
+          processBoundChatEvent(event, binding);
+        }
+        flushStreamDeltas();
+        return true;
+      } catch (startError) {
+        const message = errorMessage(startError);
+        automationOperations.current.delete(automationId);
+        markAutomationFinished(automationId, "error", message);
+        updateConversation(conversationId, (current) =>
+          updateStoredMessage(current, assistantId, (assistant) => ({
+            ...assistant,
+            content: tx("providerError", { message }),
+            status: "error",
+          })),
+        );
+        setAutomationMessage(tx("automationRunFailed", { message }));
+        return false;
+      }
+    },
+    [
+      automations,
+      flushStreamDeltas,
+      isStreaming,
+      markAutomationFinished,
+      markAutomationStarted,
+      processBoundChatEvent,
+      settings,
+      tx,
+      updateConversation,
+    ],
+  );
+
+  useEffect(() => {
+    const schedulerTimer = window.setInterval(() => {
+      if (isStreaming) {
+        return;
+      }
+      const now = Date.now();
+      const due = automations.find(
+        (automation) =>
+          automation.enabled &&
+          automation.lastStatus !== "running" &&
+          automation.nextRunAt !== null &&
+          automation.nextRunAt <= now &&
+          !automationOperations.current.has(automation.id),
+      );
+      if (due) {
+        void runAutomation(due.id, true);
+      }
+    }, 15_000);
+    return () => window.clearInterval(schedulerTimer);
+  }, [automations, isStreaming, runAutomation]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1360,6 +1690,122 @@ function App() {
       api_key: "",
     }));
     setConnectionMessage(null);
+  };
+
+  const handleCreateAutomation = async () => {
+    const name = automationName.trim().slice(0, 256);
+    const prompt = automationPrompt.trim();
+    const intervalMinutes = Math.floor(automationIntervalMinutes);
+    if (!name) {
+      setAutomationMessage(tx("automationNameRequired"));
+      return;
+    }
+    if (!prompt) {
+      setAutomationMessage(tx("automationPromptRequired"));
+      return;
+    }
+    if (prompt.length > 262_144) {
+      setAutomationMessage(tx("automationPromptTooLong"));
+      return;
+    }
+    if (intervalMinutes < 1 || intervalMinutes > 10_080) {
+      setAutomationMessage(tx("automationIntervalInvalid"));
+      return;
+    }
+
+    setAutomationBusy(true);
+    setAutomationMessage(null);
+    const now = Date.now();
+    const automation: Automation = {
+      id: createId("automation"),
+      name,
+      prompt,
+      intervalMinutes,
+      enabled: automationEnabledOnCreate,
+      lastRunAt: null,
+      nextRunAt: automationEnabledOnCreate
+        ? now + intervalMinutes * 60_000
+        : null,
+      lastStatus: "idle",
+      lastError: null,
+      lastConversationId: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    try {
+      await saveAutomation(automation);
+      setAutomations((current) => [automation, ...current]);
+      setAutomationName("");
+      setAutomationPrompt("");
+      setAutomationEnabledOnCreate(false);
+      setAutomationMessage(tx("automationCreated"));
+    } catch (saveError) {
+      setAutomationMessage(errorMessage(saveError));
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const handleToggleAutomation = async (automation: Automation) => {
+    if (automationBusy) {
+      return;
+    }
+    setAutomationBusy(true);
+    setAutomationMessage(null);
+    const enabled = !automation.enabled;
+    const now = Date.now();
+    const updated: Automation = {
+      ...automation,
+      enabled,
+      nextRunAt: enabled ? now + automation.intervalMinutes * 60_000 : null,
+      updatedAt: now,
+    };
+    try {
+      await saveAutomation(updated);
+      setAutomations((current) =>
+        current.map((item) => item.id === updated.id ? updated : item),
+      );
+      setAutomationMessage(tx("automationUpdated"));
+    } catch (saveError) {
+      setAutomationMessage(errorMessage(saveError));
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const handleDeleteAutomation = async (automation: Automation) => {
+    if (automation.lastStatus === "running") {
+      setAutomationMessage(tx("automationRunning"));
+      return;
+    }
+    if (!window.confirm(tx("automationDeleteConfirm"))) {
+      return;
+    }
+    setAutomationBusy(true);
+    setAutomationMessage(null);
+    try {
+      await deleteAutomation(automation.id);
+      setAutomations((current) =>
+        current.filter((item) => item.id !== automation.id),
+      );
+      setAutomationMessage(tx("automationDeleted"));
+    } catch (deleteError) {
+      setAutomationMessage(errorMessage(deleteError));
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const handleOpenAutomationConversation = (automation: Automation) => {
+    if (!automation.lastConversationId) {
+      return;
+    }
+    if (!conversations.some((conversation) => conversation.id === automation.lastConversationId)) {
+      setAutomationMessage(tx("automationConversationMissing"));
+      return;
+    }
+    setActiveConversationId(automation.lastConversationId);
+    setView("chats");
   };
 
   const renderChat = () => {
@@ -2268,7 +2714,205 @@ function App() {
       )}
     </div>
   );
-  const renderRoadmap = () => (
+  const renderAutomations = () => (
+    <div className="automations-view">
+      <section className="card automation-form-card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">{tx("automationCenter")}</div>
+            <h2>{tx("automationTitle")}</h2>
+          </div>
+          <span className="pill pill-blue">{tx("automationAppOpen")}</span>
+        </div>
+        <p className="settings-intro">{tx("automationDescription")}</p>
+        <form
+          className="automation-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleCreateAutomation();
+          }}
+        >
+          <div className="settings-grid automation-form-grid">
+            <label>
+              <span>{tx("automationName")}</span>
+              <input
+                value={automationName}
+                onChange={(event) => setAutomationName(event.target.value)}
+                placeholder={tx("automationNamePlaceholder")}
+                maxLength={256}
+              />
+            </label>
+            <label>
+              <span>{tx("automationInterval")}</span>
+              <input
+                type="number"
+                min={1}
+                max={10080}
+                value={automationIntervalMinutes}
+                onChange={(event) =>
+                  setAutomationIntervalMinutes(Number(event.target.value) || 1)
+                }
+              />
+              <small>{tx("automationIntervalHelp")}</small>
+            </label>
+            <label className="setting-wide">
+              <span>{tx("automationPrompt")}</span>
+              <textarea
+                value={automationPrompt}
+                onChange={(event) => setAutomationPrompt(event.target.value)}
+                placeholder={tx("automationPromptPlaceholder")}
+                rows={5}
+                maxLength={262144}
+              />
+              <small>{automationPrompt.length.toLocaleString(localeTag)} / 262,144</small>
+            </label>
+          </div>
+          <label className="automation-enable-field">
+            <input
+              type="checkbox"
+              checked={automationEnabledOnCreate}
+              onChange={(event) => setAutomationEnabledOnCreate(event.target.checked)}
+            />
+            <span>
+              <strong>{tx("automationEnableOnCreate")}</strong>
+              <small>{tx("automationEnableOnCreateHelp")}</small>
+            </span>
+          </label>
+          <div className="settings-actions">
+            <button className="primary-button" type="submit" disabled={automationBusy}>
+              {tx("automationCreate")}
+            </button>
+            {automationMessage && (
+              <span className="connection-message" role="status">{automationMessage}</span>
+            )}
+          </div>
+        </form>
+        <div className="provider-help automation-boundary-note">
+          <strong>{tx("automationBoundaryTitle")}</strong>
+          <span>{tx("automationBoundaryDescription")}</span>
+          <span>{tx("automationBoundaryHint")}</span>
+        </div>
+      </section>
+
+      <section className="card automation-list-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("automationSchedule")}</span>
+            <small className="card-caption">
+              {tx("automationCount", { count: automations.length })}
+            </small>
+          </div>
+          <span className="metric-live">
+            <span className="status-dot" /> {tx("automationStored")}
+          </span>
+        </div>
+        {automations.length === 0 ? (
+          <div className="catalog-empty automation-empty">
+            <strong>{tx("automationNoItems")}</strong>
+            <p>{tx("automationNoItemsDescription")}</p>
+          </div>
+        ) : (
+          <div className="automation-list">
+            {automations.map((automation) => {
+              const running = automation.lastStatus === "running";
+              const statusClass =
+                automation.lastStatus === "success"
+                  ? "pill-green"
+                  : automation.lastStatus === "error"
+                    ? "pill-red"
+                    : automation.lastStatus === "running"
+                      ? "pill-blue"
+                      : "pill-muted";
+              return (
+                <article
+                  className={"automation-row " + (running ? "is-running" : "")}
+                  key={automation.id}
+                >
+                  <div className="automation-row-header">
+                    <div className="automation-icon" aria-hidden="true">◷</div>
+                    <div className="automation-row-title">
+                      <strong>{automation.name}</strong>
+                      <span className={"pill " + statusClass}>
+                        {tx(automationStatusKey(automation.lastStatus))}
+                      </span>
+                    </div>
+                    <span className={"automation-enabled-state " + (automation.enabled ? "is-enabled" : "")}>
+                      {automation.enabled ? tx("automationEnabled") : tx("automationPaused")}
+                    </span>
+                  </div>
+                  <p className="automation-prompt">{automation.prompt}</p>
+                  <div className="automation-meta">
+                    <span>
+                      {tx("automationEvery", {
+                        count: automation.intervalMinutes,
+                      })}
+                    </span>
+                    <span>
+                      {automation.lastRunAt
+                        ? tx("automationLastRun", {
+                            date: new Date(automation.lastRunAt).toLocaleString(localeTag),
+                          })
+                        : tx("automationNeverRun")}
+                    </span>
+                    <span>
+                      {automation.enabled && automation.nextRunAt
+                        ? tx("automationNextRun", {
+                            date: new Date(automation.nextRunAt).toLocaleString(localeTag),
+                          })
+                        : tx("automationPaused")}
+                    </span>
+                  </div>
+                  {automation.lastError && (
+                    <div className="runtime-error automation-error">
+                      {automation.lastError}
+                    </div>
+                  )}
+                  <div className="automation-row-actions">
+                    <button
+                      className="primary-button compact-button"
+                      type="button"
+                      onClick={() => void runAutomation(automation.id)}
+                      disabled={automationBusy || running || isStreaming}
+                    >
+                      {running ? tx("automationRunning") : tx("automationRunNow")}
+                    </button>
+                    <button
+                      className="secondary-button compact-button"
+                      type="button"
+                      onClick={() => void handleToggleAutomation(automation)}
+                      disabled={automationBusy || running}
+                    >
+                      {automation.enabled ? tx("automationDisable") : tx("automationEnable")}
+                    </button>
+                    {automation.lastConversationId && (
+                      <button
+                        className="secondary-button compact-button"
+                        type="button"
+                        onClick={() => handleOpenAutomationConversation(automation)}
+                      >
+                        {tx("automationOpenConversation")}
+                      </button>
+                    )}
+                    <button
+                      className="conversation-delete automation-delete"
+                      type="button"
+                      onClick={() => void handleDeleteAutomation(automation)}
+                      disabled={automationBusy || running}
+                      aria-label={tx("automationDelete")}
+                      title={tx("automationDelete")}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+
     <section className="empty-view roadmap-view">
       <div className="empty-view-icon" aria-hidden="true">
         {navigation.find((item) => item.id === view)?.glyph}
@@ -2484,7 +3128,7 @@ function App() {
           {view === "chats" && renderChat()}
           {view === "workspaces" && renderWorkspaces()}
           {view === "models" && renderModels()}
-          {view === "automations" && renderRoadmap()}
+          {view === "automations" && renderAutomations()}
 
           {view === "chats" && (
             <>
