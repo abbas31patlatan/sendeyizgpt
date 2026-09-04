@@ -1,6 +1,6 @@
 # Aegis AI architecture
 
-Status: Milestone 2a local GGUF catalog/load-preflight slice, version `0.1.0`.
+Status: Milestone 2b supervised native llama.cpp GGUF runtime, version `0.1.0`.
 
 ## A. Product definition
 
@@ -23,13 +23,11 @@ The product has four non-negotiable properties:
    runtime and accelerator backend are separate concepts.
 
 The initial release deliberately does not pretend to implement computer
-control, browser interaction, microphone capture, screen capture, MCP
-execution, native tensor inference or a native runtime backend. The current
-workspace registry can validate and store a directory scope, while the local
-model catalog can explicitly scan registered GGUF roots for bounded metadata.
-Neither feature grants file access to a model or agent. Effectful capabilities
-are introduced only when their worker, policy, preview, audit and test boundaries
-exist.
+control, browser interaction, microphone capture, screen capture, MCP execution,
+or a general-purpose tool executor. Aegis now has a supervised native llama.cpp
+GGUF runtime, while browser/audio/vision/tool capabilities still require their
+own worker, policy, preview, audit and test boundaries. Workspace registration and
+model catalog access never grant arbitrary files to a model or agent.
 
 ## B. Technology decisions
 
@@ -42,7 +40,7 @@ exist.
 | Async | Tokio + tokio-util cancellation tokens | Structured asynchronous workers, bounded channels and uniform cancellation. |
 | Persistence | SQLite via `rusqlite` with bundled SQLite | One user, local-first workload; no server dependency. Foreign keys are enabled per connection and WAL is used for responsive reads/writes. The Tauri shell opens `aegis.sqlite3` in the current user's app-data directory; numbered migrations and repository transactions own durable conversations/workspace scopes. See SQLite's [foreign key](https://www.sqlite.org/foreignkeys.html) and [WAL](https://www.sqlite.org/wal.html) documentation. |
 | Secrets | Windows Credential Manager/DPAPI adapter | Secrets never live in JSON, SQLite, logs, model prompts or diagnostic bundles. A platform-neutral trait keeps the core testable. |
-| Local inference | Supervised llama.cpp worker, first format GGUF | llama.cpp is a C/C++ runtime with GGUF-oriented model tooling, Vulkan, CPU+GPU hybrid inference and multiple accelerator backends. See the [upstream repository](https://github.com/ggml-org/llama.cpp). The C/C++ boundary stays outside the desktop process. |
+| Local inference | Supervised native `llama-server`, first format GGUF | The Tauri shell launches a real llama.cpp server outside the desktop process, passes the revalidated model/profile as an argument vector, waits for `/health`, then reuses the OpenAI-compatible stream/cancel transport. The Windows bundle is built from a pinned upstream commit as a static CPU runtime; a compatible external GPU build can be selected explicitly. |
 | AMD path | Vulkan first | It is the first-class Windows path for the RX 5700 XT target without making ROCm a hard prerequisite. Vulkan capability and driver behavior are detected, not assumed. |
 | NVIDIA path | CUDA adapter later | Added as another worker backend; no UI or agent changes. |
 | Remote models | OpenAI-compatible provider adapter | Remote use remains an explicit provider with a visible data route and per-provider secret reference. |
@@ -158,7 +156,7 @@ The context builder places tool/browser/document output in a distinct untrusted
 content envelope. It cannot become a system or developer message merely by
 containing text such as “ignore previous instructions”.
 
-## F. M1b persistence and workspace registry
+## E.1 M1b persistence and workspace registry
 
 The native shell creates the database before registering Tauri commands. The
 repository layer exposes typed `ConversationRecord`, `MessageRecord` and
@@ -192,9 +190,10 @@ limits apply before metadata is persisted or returned over Tauri IPC.
 Selecting a model re-inspects the file and verifies its size and metadata hash
 before estimating a saved Eco, Balanced or Performance profile. Context capacity
 and resource limits are validated against the model descriptor. Weight, KV-cache,
-RAM and VRAM values include a confidence label and are preflight guidance only;
-actual worker/runtime metrics remain a separate contract. Native llama.cpp tensor
-loading and generation are intentionally not claimed by this slice.
+RAM and VRAM values include a confidence label and are advisory before load. The
+separate native runtime path then launches `llama-server`, so **Ready** means the
+process accepted the GGUF and exposed `/health`; it does not invent GPU/VRAM
+telemetry that the runtime has not reported.
 
 ## F. Inference architecture
 
@@ -218,16 +217,24 @@ The first `InferenceBackend` contract exposes:
 - `get_runtime_metrics`
 
 Each backend reports capability flags rather than letting the UI infer them
-from a name. The worker launch sequence is:
+from a name. The current native llama.cpp launch sequence is:
 
-1. Validate the model path, GGUF header size and metadata limits.
-2. Match `ModelDescriptor` to `RuntimeDescriptor` and `BackendDescriptor`.
-3. Calculate an estimate for weights, KV cache, scratch, context and offload;
-   show confidence and label it as an estimate.
-4. Start the version-pinned worker and perform the authenticated handshake.
-5. Load the model with the selected `LoadProfile`.
-6. Stream metrics and tokens through bounded channels; stop on cancellation,
-   timeout or worker exit.
+1. Re-inspect the cataloged GGUF and require its absolute path, exact size and
+   metadata hash to match the selected model record.
+2. Match `ModelDescriptor` to the selected `LoadProfile`; reject unsupported
+   context, cache or offload values before spawning a process.
+3. Resolve the bundled pinned runtime, an explicit executable or a PATH command.
+   Reserve a random `127.0.0.1` port and pass all settings as an argument vector.
+4. Start `llama-server` outside the Tauri process and poll `/health`: 503/loading
+   is not ready, while a successful response is the real tensor-load gate.
+5. Reuse the OpenAI-compatible `/v1` client for streaming, reasoning, usage and
+   cancellation; the process watchdog turns an unexpected exit into an error.
+6. On unload, cancellation of startup or application drop, kill and wait for the
+   child process so a native server cannot remain orphaned.
+
+The current M2b path uses loopback HTTP because it is the API exposed by the
+official server. Agent/tool workers continue to use the authenticated named-pipe
+IPC boundary described above; they do not receive the native server's authority.
 
 For the RX 5700 XT target, Vulkan is the preferred detected backend. A model
 larger than VRAM may use CPU/GPU split when the backend advertises it. No
@@ -441,6 +448,7 @@ policy, audit integrity and application availability.
 | M1a | Chat UI, OpenAI-compatible local provider, typed streaming events, connection diagnostics and session settings | Ollama/LM Studio-compatible endpoint can stream/cancel; provider, SSE and security tests pass |
 | M1b | SQLite conversation repositories, reasoning preservation and workspace registry | Conversations and named scopes survive restart; workspace registration is read-only and broker-free |
 | M2a | Bounded GGUF library scan, metadata inventory, persisted model profiles and load preflight | Canonical roots scan safely; corrupt files are reported; profile estimates validate against model capacity |
+| M2b | Supervised native llama.cpp GGUF tensor runtime | Pinned Windows runtime builds; Tauri owns start/stop; model hash is rechecked; `/health` gates Ready; bilingual UI routes loopback streaming |
 | M3 | Tool runtime, broker UI, audit log, filesystem read, safe shell proposal | Approval is required for every side effect and is integration-tested |
 | M4 | Coding workspace, project search, diff/edit flow, Git state, bounded coding agent | Write/test actions require separate previews and approvals |
 | M5 | MCP, search provider, browser worker and citations | Untrusted web content cannot alter policy; citations reference fetched sources |
@@ -449,10 +457,10 @@ policy, audit integrity and application availability.
 | M8 | Event engine, weather/earthquake providers, scheduler and notifications | Sources/update times visible; automations are inspectable and cancellable |
 | M9 | Plugin SDK, WASM/process host, routing, custom architectures, signed runtime updates | Compatibility and sandbox policy tested across plugin versions |
 
-M0, M1a and the M1b persistence/workspace slice are implemented product
-foundations. M2a adds the real local GGUF catalog and load preflight described
-above. Fully local llama.cpp tensor inference, Vulkan detection/offload and
-runtime metrics remain the next worker-backed integration boundary.
+M0, M1a, M1b, M2a and M2b are implemented product foundations. M2b adds the
+real native llama.cpp tensor-loading boundary described above. Vulkan/GPU
+capability detection, adaptive offload telemetry, tool execution and the other
+worker-backed capabilities remain subsequent integration boundaries.
 
 ## N. Highest technical risks
 
@@ -462,9 +470,9 @@ runtime metrics remain the next worker-backed integration boundary.
 2. **Windows path semantics:** junctions, reparse points and TOCTOU require
    native handle-based validation in the tool worker; lexical path checks alone
    are insufficient.
-3. **Worker packaging:** inference binaries, Vulkan dependencies and licenses
-   must be versioned, checksummed, restartable and distributable without making
-   the installer huge.
+3. **Worker packaging:** the pinned CPU runtime, optional external GPU runtimes,
+   upstream notices and package hashes must remain versioned, restartable and
+   distributable without making the installer unexpectedly huge.
 4. **Native backend safety:** malformed model metadata and driver crashes remain
    higher-risk than ordinary Rust code. Keep parsers/workers isolated and fuzz
    the GGUF boundary.
@@ -484,6 +492,8 @@ runtime metrics remain the next worker-backed integration boundary.
 - workspace manifest, toolchain and formatting configuration
 - CI workflow configuration
 - `scripts/build-windows.ps1` release verification/build entrypoint
+- `scripts/build-llama-runtime.ps1` pinned llama.cpp source build
+- `apps/desktop/src-tauri/runtime/README.md` runtime selection and packaging notes
 - `README.md`, `ARCHITECTURE.md`, `SECURITY.md`, `PLUGIN_API.md`,
   `DEVELOPMENT.md`, `THIRD_PARTY_LICENSES.md`
 - `package.json`, frontend and desktop package manifests/lockfiles
@@ -495,6 +505,7 @@ runtime metrics remain the next worker-backed integration boundary.
 - `crates/permissions/src/lib.rs`
 - `crates/tools/src/lib.rs`
 - `crates/inference/src/lib.rs`
+- `crates/inference/src/llama_server.rs`
 - `crates/providers/src/lib.rs`
 - `crates/agent/src/lib.rs`
 - `crates/database/src/lib.rs`

@@ -23,12 +23,32 @@ The local catalog is deliberately metadata-only and user initiated:
 
 - Only a registered, canonicalized directory is scanned; symlinks are not followed.
 - Traversal, file count, metadata size, string size, array size and nesting are bounded.
-- GGUF headers and metadata are parsed; tensor data is never loaded or executed.
+- GGUF headers and metadata are parsed during cataloging; tensor data is not loaded or executed by the scanner.
 - A corrupt file is returned as a non-fatal issue while valid models remain indexable.
 - Model metadata is persisted as bounded SQLite data; it is not a permission grant or
   an instruction source for a model, agent or tool.
-- Load estimates and profiles are advisory preflight data. They do not claim that a
-  runtime has loaded the model or that the device can sustain the estimate.
+- Load estimates and profiles are advisory before launch. The native runtime's
+  explicit **Ready** state is the evidence that `llama-server` accepted the GGUF;
+  it still does not claim that every estimate or device metric is sustainable.
+
+## Native runtime boundary
+
+Native tensor loading is a separate, supervised process boundary:
+
+- A start request must name a cataloged model. The shell re-inspects the GGUF and
+  requires the ID, exact file size and metadata hash to match the SQLite record.
+- The executable is either the packaged pinned runtime, a user-selected regular
+  file or a bare command resolved through PATH. No shell string is constructed.
+- The model path and profile settings are passed as an argument vector; stdin and
+  stdout/stderr are detached, and Windows uses a hidden child-process window.
+- `llama-server` binds only to `127.0.0.1` on a random reserved port, starts in
+  offline mode and must pass `/health` before the UI marks tensors **Ready**.
+- Tauri owns the child lifecycle, generation guard, failure state and kill/wait
+  cleanup on unload, startup cancellation and application shutdown.
+- Native chat uses the loopback `/v1` endpoint without a provider API key; the
+  existing bounded streaming/reasoning/cancel client remains in force.
+- The bundled release is CPU-native. GPU acceleration requires a compatible
+  external llama.cpp build selected explicitly by path or PATH.
 
 ## Trust zones
 
@@ -56,12 +76,12 @@ Do not include real API keys, personal files or private model assets in an issue
 The first report should include the smallest reproducible input, affected
 worker/core boundary, platform and whether a permit was required.
 
-## Deliberate limitations in Milestone 1b
+## Deliberate limitations after M2b
 
-The current foundation does not expose host filesystem, shell, browser,
-microphone, camera, screen or keyboard/mouse executors, or native tensor
-inference/runtime loading. Workspace registration only performs read-only path
-metadata validation; the local model catalog only reads bounded GGUF metadata and
-returns advisory preflight estimates. Neither is a file access grant. This is
-intentional: the security contract is present before effectful features are added.
+The current product does not expose host filesystem, shell, browser, microphone,
+camera, screen or keyboard/mouse executors. Native GGUF tensor loading is real and
+supervised, but GPU capability detection, detailed device telemetry and effectful
+tool workers remain separate milestones. Workspace registration is still only
+read-only path metadata validation, and neither it nor model loading is a file
+access grant.
 

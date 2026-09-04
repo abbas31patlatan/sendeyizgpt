@@ -1,6 +1,6 @@
 # ADR 0001: keep native runtimes outside the desktop process
 
-Status: accepted for Milestone 0
+Status: accepted and extended for Milestone 2b
 
 ## Context
 
@@ -12,10 +12,14 @@ dependency.
 ## Decision
 
 The Tauri desktop process owns UI commands, trusted policy, worker lifecycle
-and persistence coordination. Inference, agent planning, tool execution,
-browser, audio and vision run behind typed, versioned local IPC. The first
-inference adapter is a supervised llama.cpp worker. Windows production IPC is a
-per-launch named pipe with a current-user ACL and HMAC-authenticated frames.
+and persistence coordination. The native llama.cpp adapter is a supervised
+`llama-server` process outside that address space: it receives a revalidated GGUF
+path and profile via an argument vector, binds to a random `127.0.0.1` port, and
+is considered loaded only after `/health` succeeds. The existing OpenAI-compatible
+client then uses its `/v1` endpoint for streaming and cancellation. Inference,
+agent planning, tool execution, browser, audio and vision remain replaceable
+worker capabilities; agent/tool workers use typed, versioned authenticated IPC
+with a per-launch Windows named pipe, current-user ACL and HMAC frames.
 
 ## Consequences
 
@@ -28,6 +32,8 @@ Positive:
 Costs:
 
 - Worker startup, streaming and cancellation need explicit lifecycle code.
-- Packaging is more complex because runtime binaries are separate artifacts.
-- IPC schemas and compatibility tests become part of the release contract.
+- Packaging is more complex because runtime binaries are separate artifacts and
+  the pinned CPU build must be reproducible.
+- Loopback HTTP is intentionally limited to the native server's local API; future
+  agent/tool workers still require authenticated IPC schemas and compatibility tests.
 

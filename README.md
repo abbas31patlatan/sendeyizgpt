@@ -7,7 +7,7 @@ mediated by a native Permission Broker.
 
 ## Current status
 
-Milestone 0 foundation, M1a local chat, M1b persistence/workspace and the M2a local model catalog/preflight slice are in place:
+Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model catalog/preflight and M2b supervised native llama.cpp runtime are in place:
 
 - Tauri 2 + React/TypeScript desktop shell
 - Rust workspace with typed protocol, IPC authentication helpers, inference and agent contracts
@@ -22,15 +22,18 @@ Milestone 0 foundation, M1a local chat, M1b persistence/workspace and the M2a lo
 - Provider health diagnostics with measured latency, live model catalog and model-card selection
 - Bounded, metadata-only GGUF scanner with canonical roots, symlink skipping, deterministic traversal and per-file issue reporting
 - SQLite-backed model libraries, real local inventory and Eco/Balanced/Performance profiles with advisory memory preflight
+- Supervised native llama.cpp `llama-server` lifecycle: GGUF revalidation, real tensor-load health gate, loopback endpoint and clean unload
+- Bilingual native runtime controls with bundled pinned CPU runtime support and explicit external GPU-runtime path selection
 - Per-provider system prompt, conversation rename/Markdown export and strict bilingual UX
 - Architecture, security, plugin and development documentation
 
-Native llama.cpp tensor inference/generation, browser, audio, vision and real tool
-execution are not yet wired. The model library now performs an explicit, bounded
-metadata-only scan of registered GGUF directories, persists a SQLite snapshot and
-preflights load profiles without loading tensors. Workspace registration and model
-catalog access still do not grant files to a model or agent; every future effect
-needs the Permission Broker and a worker boundary.
+Native llama.cpp tensor loading and generation are now wired through a supervised
+`llama-server` process. Aegis re-inspects the cataloged GGUF, launches a real native
+executable on a random loopback port and marks the model ready only after the
+server's `/health` gate succeeds. The Windows package builds a pinned, static CPU
+runtime from upstream; a compatible external GPU build can be selected by PATH or
+an explicit executable path. Browser, audio, vision and real tool execution remain
+separate future worker capabilities.
 
 ## Prerequisites
 
@@ -41,7 +44,8 @@ Development on Windows requires:
 - Rust stable with the `x86_64-pc-windows-msvc` target
 - Node.js 20+ and npm
 - Tauri CLI (`cargo install tauri-cli --locked`)
-- Vulkan runtime/driver for AMD or other Vulkan-capable GPUs
+- Git and CMake with the Visual Studio C++ workload (needed to build the pinned runtime)
+- Vulkan runtime/driver only when using a compatible external GPU build; the bundled release runtime is CPU-native
 
 ## Commands
 
@@ -58,6 +62,7 @@ On a Windows development machine, the complete verification and installer
 build can be run with:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-llama-runtime.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
@@ -83,6 +88,25 @@ Default local endpoint: `http://127.0.0.1:11434/v1` (Ollama). LM Studio
 normally uses `http://127.0.0.1:1234/v1`. Quick provider cards can apply
 either local endpoint. The optional API key is held only in memory for the
 current session and is never persisted by the frontend or SQLite.
+
+### Native llama.cpp local chat
+
+For a model-file workflow, use the **Model library** without running Ollama or
+LM Studio:
+
+1. Register a directory and scan it; only bounded GGUF metadata is indexed.
+2. Select a model, choose an Eco/Balanced/Performance profile and review preflight.
+3. Choose the bundled runtime or enter a compatible external `llama-server` path,
+   then select **Load tensors**.
+4. Wait for the status to become **Ready**. The desktop routes chat to the
+   supervised loopback `/v1` endpoint and uses the same streaming/reasoning/cancel
+   transport as the other OpenAI-compatible providers.
+5. Select **Unload** when finished; the native process is terminated and its state
+   is cleared.
+
+The packaged Windows runtime is deliberately CPU-native and reproducible. GPU
+acceleration remains available through a user-selected compatible build so a
+driver/backend choice is never silently guessed.
 
 ## Interface and performance
 
@@ -127,4 +151,6 @@ and the provider's live `/models` catalog. Local model registration canonicalize
 user-selected directory, reads only bounded GGUF headers/metadata, retains valid
 models when another file is corrupt, and stores the indexed snapshot in SQLite.
 Profiles are saved separately and their weight/KV-cache/RAM/VRAM figures are
-explicitly advisory until a native runtime reports actual metrics.
+explicitly advisory before load. Once the native runtime reports **Ready**, that is
+evidence that the process accepted the GGUF; detailed device telemetry remains
+unavailable unless the selected runtime exposes it.

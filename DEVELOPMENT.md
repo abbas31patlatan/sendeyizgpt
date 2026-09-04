@@ -8,6 +8,7 @@
   audit strategy.
 - Keep large content out of SQLite rows; use attachment/blob references.
 - Never commit model files, API keys, local databases or generated installers.
+- Never commit the generated `llama-server` binary or its build tree; reproduce it from the pinned source commit.
 - Do not treat demo data as production state.
 - Add a new numbered migration for schema changes; never edit an applied migration.
 - Keep provider secrets out of both SQLite and browser storage; only non-secret UI/provider preferences may use the preview fallback.
@@ -64,14 +65,35 @@ without hiding the valid model. Re-scan after changing or removing a file and
 confirm the SQLite snapshot reflects the current directory.
 
 The scanner must remain metadata-only and bounded: do not add tensor reads, model
-execution, symlink traversal or unbounded recursive discovery. A successful load
-preflight validates the profile and reports estimates; it is not evidence that a
-native runtime has loaded the model. Run the focused tests with:
+execution, symlink traversal or unbounded recursive discovery. A successful
+preflight is only an estimate; verify the native runtime panel reaches **Ready**
+after `/health` before claiming that a model was loaded. Run the focused tests with:
 
 ```powershell
 cargo test -p aegis-inference catalog
 cargo test -p aegis-database model_library_repository
 ```
+
+### Native llama.cpp runtime
+
+The desktop's model-file path uses a real `llama-server` process. The build script
+fetches the pinned upstream commit, configures a static CPU-native Windows
+runtime and writes the binary plus `LLAMA_CPP_BUILD.txt` to the ignored runtime
+directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-llama-runtime.ps1
+```
+
+This requires Git, CMake and the Visual Studio C++ workload. No model file is
+downloaded by the build. For GPU acceleration, build a compatible llama.cpp
+server separately and select its executable in the native runtime panel or make
+it available on PATH; the app will not silently replace a failed native path with
+a remote provider.
+
+After launch, verify the Model library status reaches **Ready** and that the
+chat route points to the reported loopback `/v1` endpoint. Stop and reload the
+model to exercise process cleanup and generation-safe restart behavior.
 
 ## Windows build
 
@@ -82,17 +104,23 @@ elevation must be implemented as explicit, narrowly-scoped operations.
 Before a release:
 
 1. Build and test on Windows 10 and Windows 11 x64.
-2. Exercise an AMD Vulkan machine, including the RX 5700 XT target system.
-3. Validate worker restart after an inference process failure.
-4. Inspect the Tauri capability file and generated installer permissions.
-5. Produce a diagnostic bundle with secrets and personal content redacted.
+2. Exercise the bundled CPU runtime with a small valid GGUF: load, stream, cancel,
+   unload and reload it.
+3. If an external GPU runtime is supplied, exercise the AMD Vulkan machine,
+   including the RX 5700 XT target system, and record the exact runtime build.
+4. Validate native process restart after an inference process failure.
+5. Inspect the Tauri capability file, packaged `llama-server.exe` hash and generated
+   installer permissions.
+6. Produce a diagnostic bundle with secrets and personal content redacted.
 
 ## Adding a backend
 
-Implement `InferenceBackend` in a worker adapter. Keep model format parsing,
-runtime descriptors and UI presentation separate. The adapter must expose
-capabilities and metrics, reject incompatible profiles with structured errors,
-and support cancellation.
+Keep model format parsing, runtime descriptors and UI presentation separate. The
+current M2b adapter supervises an external `llama-server` and deliberately reuses
+its OpenAI-compatible HTTP surface for stream/reasoning/cancel. A future direct
+`InferenceBackend` worker may embed or wrap another native API, but it must expose
+capabilities and metrics, reject incompatible profiles with structured errors and
+support cancellation without moving C/C++ code into the Tauri process.
 
 ## Adding a tool
 
