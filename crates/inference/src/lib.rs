@@ -1,13 +1,15 @@
 //! Runtime-independent inference contracts and transparent resource estimates.
 //!
-//! No C/C++ backend is linked here. A worker adapter will implement this trait
-//! for a supervised llama.cpp process first, then for future runtimes.
+//! Native inference is supervised out-of-process: the llama.cpp server owns GGUF tensor
+//! loading while this crate owns validation, lifecycle, health checks and cancellation boundaries.
 
 pub mod catalog;
+pub mod llama_server;
 
 pub use catalog::{
     ModelScanIssue, ModelScanReport, ScannedModel, inspect_gguf_model, scan_model_directory,
 };
+pub use llama_server::{LlamaServerRuntime, NativeRuntimePhase, NativeRuntimeStatus};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
