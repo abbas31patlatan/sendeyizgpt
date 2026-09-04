@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use thiserror::Error;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 const MAX_CONVERSATION_TITLE_BYTES: usize = 512;
 const MAX_WORKSPACE_NAME_BYTES: usize = 256;
 const MAX_WORKSPACE_PATH_BYTES: usize = 4096;
@@ -16,6 +16,7 @@ const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_MODEL_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MODEL_PROFILE_BYTES: usize = 256 * 1024;
 const MAX_MODEL_NAME_BYTES: usize = 512;
+const MAX_AUTOMATION_NAME_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +92,21 @@ pub struct ModelProfileRecord {
     pub preset: String,
     pub model_id: Option<String>,
     pub config_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub struct AutomationRecord {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    pub interval_minutes: u32,
+    pub enabled: bool,
+    pub last_run_at: Option<i64>,
+    pub next_run_at: Option<i64>,
+    pub last_status: String,
+    pub last_error: Option<String>,
+    pub last_conversation_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -706,6 +722,109 @@ impl Database {
             .map_err(DatabaseError::Repository)?;
         Ok(deleted > 0)
     }
+    pub fn list_automations(&self) -> Result<Vec<AutomationRecord>, DatabaseError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned("database connection"))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, name, prompt, interval_minutes, enabled,
+                        last_run_at, next_run_at, last_status, last_error,
+                        last_conversation_id, created_at, updated_at
+                 FROM automations
+                 WHERE trigger_kind = 'interval'
+                 ORDER BY enabled DESC, updated_at DESC, name COLLATE NOCASE ASC",
+            )
+            .map_err(DatabaseError::Repository)?;
+        let rows = statement
+            .query_map([], automation_row)
+            .map_err(DatabaseError::Repository)?;
+
+        rows.map(|row| {
+            let row = row.map_err(DatabaseError::Repository)?;
+            automation_from_row(row)
+        })
+        .collect()
+    }
+
+    pub fn save_automation(&self, automation: &AutomationRecord) -> Result<(), DatabaseError> {
+        validate_automation(automation)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned("database connection"))?;
+        let created_at = normalized_timestamp(automation.created_at).to_string();
+        let updated_at = normalized_timestamp(automation.updated_at).to_string();
+        let last_run_at = automation
+            .last_run_at
+            .map(normalized_timestamp)
+            .map(|value| value.to_string());
+        let next_run_at = automation
+            .next_run_at
+            .map(normalized_timestamp)
+            .map(|value| value.to_string());
+
+        connection
+            .execute(
+                "INSERT INTO automations (
+                     id, name, source_id, trigger_kind, condition_json, action_json,
+                     enabled, last_run_at, next_run_at, created_at, updated_at,
+                     prompt, interval_minutes, last_status, last_error, last_conversation_id
+                 ) VALUES (
+                     ?1, ?2, NULL, 'interval', ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                     ?10, ?11, ?12, ?13, ?14
+                 )
+                 ON CONFLICT(id) DO UPDATE SET
+                     name = excluded.name,
+                     trigger_kind = 'interval',
+                     condition_json = excluded.condition_json,
+                     action_json = excluded.action_json,
+                     enabled = excluded.enabled,
+                     last_run_at = excluded.last_run_at,
+                     next_run_at = excluded.next_run_at,
+                     updated_at = excluded.updated_at,
+                     prompt = excluded.prompt,
+                     interval_minutes = excluded.interval_minutes,
+                     last_status = excluded.last_status,
+                     last_error = excluded.last_error,
+                     last_conversation_id = excluded.last_conversation_id",
+                params![
+                    automation.id,
+                    automation.name,
+                    r#"{"kind":"interval"}"#,
+                    r#"{"kind":"chat"}"#,
+                    i64::from(automation.enabled),
+                    last_run_at,
+                    next_run_at,
+                    created_at,
+                    updated_at,
+                    automation.prompt,
+                    i64::from(automation.interval_minutes),
+                    automation.last_status,
+                    automation.last_error,
+                    automation.last_conversation_id,
+                ],
+            )
+            .map_err(DatabaseError::Repository)?;
+        Ok(())
+    }
+
+    pub fn delete_automation(&self, automation_id: &str) -> Result<bool, DatabaseError> {
+        validate_id(automation_id, "automation id")?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| DatabaseError::LockPoisoned("database connection"))?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM automations WHERE id = ?1",
+                params![automation_id],
+            )
+            .map_err(DatabaseError::Repository)?;
+        Ok(deleted > 0)
+    }
+
 }
 
 fn read_messages(
@@ -748,6 +867,74 @@ fn read_messages(
         })
     })
     .collect()
+}
+
+type AutomationSqlRow = (
+    String,
+    String,
+    String,
+    i64,
+    i64,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+);
+
+fn automation_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AutomationSqlRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+    ))
+}
+
+fn automation_from_row(row: AutomationSqlRow) -> Result<AutomationRecord, DatabaseError> {
+    let (
+        id,
+        name,
+        prompt,
+        interval_minutes,
+        enabled,
+        last_run_at,
+        next_run_at,
+        last_status,
+        last_error,
+        last_conversation_id,
+        created_at,
+        updated_at,
+    ) = row;
+
+    let automation = AutomationRecord {
+        id,
+        name,
+        prompt,
+        interval_minutes: u32::try_from(interval_minutes).map_err(|_| {
+            DatabaseError::InvalidData("automation interval is outside the supported range".to_owned())
+        })?,
+        enabled: bool_from_sql(enabled, "automation enabled")?,
+        last_run_at: optional_timestamp(last_run_at)?,
+        next_run_at: optional_timestamp(next_run_at)?,
+        last_status,
+        last_error,
+        last_conversation_id,
+        created_at: parse_timestamp(&created_at)?,
+        updated_at: parse_timestamp(&updated_at)?,
+    };
+    validate_automation(&automation)?;
+    Ok(automation)
 }
 
 type ModelSqlRow = (
@@ -901,6 +1088,47 @@ fn validate_model(model: &ModelRecord) -> Result<(), DatabaseError> {
         return Err(DatabaseError::InvalidData(
             "model metadata hash is too long".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_automation(automation: &AutomationRecord) -> Result<(), DatabaseError> {
+    validate_id(&automation.id, "automation id")?;
+    if automation.name.trim().is_empty() || automation.name.len() > MAX_AUTOMATION_NAME_BYTES {
+        return Err(DatabaseError::InvalidData(
+            "automation name is empty or too long".to_owned(),
+        ));
+    }
+    if automation.prompt.trim().is_empty() || automation.prompt.len() > MAX_MESSAGE_BYTES {
+        return Err(DatabaseError::InvalidData(
+            "automation prompt is empty or too large".to_owned(),
+        ));
+    }
+    if !(1..=10_080).contains(&automation.interval_minutes) {
+        return Err(DatabaseError::InvalidData(
+            "automation interval must be between 1 and 10080 minutes".to_owned(),
+        ));
+    }
+    if !matches!(
+        automation.last_status.as_str(),
+        "idle" | "running" | "success" | "error" | "cancelled"
+    ) {
+        return Err(DatabaseError::InvalidData(format!(
+            "unsupported automation status: {}",
+            automation.last_status
+        )));
+    }
+    if automation
+        .last_error
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_MESSAGE_BYTES)
+    {
+        return Err(DatabaseError::InvalidData(
+            "automation error is too large".to_owned(),
+        ));
+    }
+    if let Some(conversation_id) = &automation.last_conversation_id {
+        validate_id(conversation_id, "automation conversation id")?;
     }
     Ok(())
 }
@@ -1167,6 +1395,10 @@ fn migration(version: i64) -> Option<(&'static str, &'static str)> {
             "message_reasoning_column",
             include_str!("../migrations/0002_message_reasoning.sql"),
         )),
+        3 => Some((
+            "automation_execution_state",
+            include_str!("../migrations/0003_automation_execution_state.sql"),
+        )),
         _ => None,
     }
 }
@@ -1360,4 +1592,38 @@ mod tests {
                 .is_empty()
         );
     }
+    #[test]
+    fn automation_repository_round_trips_and_deletes() {
+        let database = Database::open_in_memory().expect("database opens");
+        let automation = AutomationRecord {
+            id: "automation-1".to_owned(),
+            name: "Project brief".to_owned(),
+            prompt: "Summarize the project status.".to_owned(),
+            interval_minutes: 60,
+            enabled: true,
+            last_run_at: Some(1_700_000_000_000),
+            next_run_at: Some(1_700_000_003_600),
+            last_status: "success".to_owned(),
+            last_error: None,
+            last_conversation_id: Some("conversation-1".to_owned()),
+            created_at: 1_700_000_000_000,
+            updated_at: 1_700_000_000_100,
+        };
+
+        database
+            .save_automation(&automation)
+            .expect("automation saves");
+        assert_eq!(
+            database.list_automations().expect("automations load"),
+            vec![automation]
+        );
+        assert!(database
+            .delete_automation("automation-1")
+            .expect("automation deletes"));
+        assert!(database
+            .list_automations()
+            .expect("automations reload")
+            .is_empty());
+    }
+
 }

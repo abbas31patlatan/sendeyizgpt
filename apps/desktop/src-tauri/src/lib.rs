@@ -1,7 +1,7 @@
 use aegis_core::{ApplicationCore, RuntimeStatus};
 use aegis_database::{
-    ConversationRecord, Database, ModelLibraryRecord, ModelProfileRecord, ModelRecord,
-    WorkspaceRecord,
+    AutomationRecord, ConversationRecord, Database, ModelLibraryRecord, ModelProfileRecord,
+    ModelRecord, WorkspaceRecord,
 };
 use aegis_inference::{
     LlamaServerRuntime, LoadPreset, LoadProfile, MemoryEstimate, ModelFormat, NativeRuntimePhase,
@@ -242,6 +242,36 @@ fn validate_directory_path(path: &str) -> WorkspacePathDiagnostics {
 #[tauri::command]
 fn validate_workspace_path(path: String) -> WorkspacePathDiagnostics {
     validate_directory_path(&path)
+}
+
+#[tauri::command]
+fn load_automations(state: State<'_, DesktopState>) -> Result<Vec<AutomationRecord>, String> {
+    state
+        .database
+        .list_automations()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn save_automation(
+    state: State<'_, DesktopState>,
+    automation: AutomationRecord,
+) -> Result<(), String> {
+    state
+        .database
+        .save_automation(&automation)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_automation(
+    state: State<'_, DesktopState>,
+    automation_id: String,
+) -> Result<bool, String> {
+    state
+        .database
+        .delete_automation(&automation_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -766,6 +796,9 @@ pub fn run() {
             save_workspace,
             delete_workspace,
             validate_workspace_path,
+            load_automations,
+            save_automation,
+            delete_automation,
             load_model_libraries,
             save_model_library,
             delete_model_library,

@@ -224,6 +224,33 @@ export const ModelProfileSchema = z.object({
 
 export type ModelProfile = z.infer<typeof ModelProfileSchema>;
 
+export const AutomationStatusSchema = z.enum([
+  "idle",
+  "running",
+  "success",
+  "error",
+  "cancelled",
+]);
+
+export type AutomationStatus = z.infer<typeof AutomationStatusSchema>;
+
+export const AutomationSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  prompt: z.string().min(1),
+  intervalMinutes: z.number().int().min(1).max(10080),
+  enabled: z.boolean(),
+  lastRunAt: z.number().int().nonnegative().nullable(),
+  nextRunAt: z.number().int().nonnegative().nullable(),
+  lastStatus: AutomationStatusSchema,
+  lastError: z.string().nullable(),
+  lastConversationId: z.string().nullable(),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative(),
+});
+
+export type Automation = z.infer<typeof AutomationSchema>;
+
 export const PersistedMessageSchema = z.object({
   id: z.string().min(1),
   role: ChatRoleSchema,

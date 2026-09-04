@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
+  AutomationSchema,
   ChatEventSchema,
   parseOperationStarted,
   PersistedConversationSchema,
@@ -15,6 +16,7 @@ import {
   RuntimeStatusSchema,
   NativeRuntimeStatusSchema,
   WorkspacePathDiagnosticsSchema,
+  type Automation,
   type ChatEvent,
   type ChatRequest,
   type PersistedConversation,
@@ -118,6 +120,19 @@ export async function savePersistedWorkspace(workspace: PersistedWorkspace): Pro
 
 export async function deletePersistedWorkspace(workspaceId: string): Promise<boolean> {
   return invoke<boolean>("delete_workspace", { workspaceId });
+}
+
+export async function loadAutomations(): Promise<Automation[]> {
+  const raw = await invoke<unknown>("load_automations");
+  return AutomationSchema.array().parse(raw);
+}
+
+export async function saveAutomation(automation: Automation): Promise<void> {
+  await invoke("save_automation", { automation });
+}
+
+export async function deleteAutomation(automationId: string): Promise<boolean> {
+  return invoke<boolean>("delete_automation", { automationId });
 }
 
 export async function validateWorkspacePath(
