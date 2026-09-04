@@ -4,14 +4,14 @@ use aegis_database::{
     WorkspaceRecord,
 };
 use aegis_inference::{
-    LoadPreset, LoadProfile, MemoryEstimate, ModelFormat, ScannedModel, inspect_gguf_model,
-    scan_model_directory,
+    inspect_gguf_model, scan_model_directory, LoadPreset, LoadProfile, LlamaServerRuntime,
+    MemoryEstimate, ModelFormat, NativeRuntimePhase, NativeRuntimeStatus, ScannedModel,
 };
 use aegis_providers::{
     ChatChunk, ChatCompletionSummary, ChatRequest, OpenAiCompatibleClient, ProviderConfig,
     ProviderError, ProviderModel,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,6 +21,7 @@ use uuid::Uuid;
 pub struct DesktopState {
     pub core: Arc<ApplicationCore>,
     pub database: Arc<Database>,
+    pub native_runtime: Arc<LlamaServerRuntime>,
 }
 
 #[derive(Debug, Serialize)]
@@ -109,16 +110,45 @@ struct ModelLoadEstimate {
     estimate: MemoryEstimate,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeModelStartRequest {
+    model_id: String,
+    preset: LoadPreset,
+    runtime_path: Option<String>,
+}
+
 fn emit_chat(app: &AppHandle, event: ChatEvent) {
     let _ = app.emit("aegis://chat", event);
 }
 
 #[tauri::command]
 fn runtime_status(state: State<'_, DesktopState>) -> Result<RuntimeStatus, String> {
-    state
+    let native = state
+        .native_runtime
+        .status()
+        .map_err(|error| error.to_string())?;
+    let mut status = state
         .core
         .runtime_status()
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    match native.phase {
+        NativeRuntimePhase::Starting
+        | NativeRuntimePhase::Loading
+        | NativeRuntimePhase::Ready => {
+            status.model_name = native.model_name.clone();
+            status.backend_name = Some("llama.cpp native server".to_owned());
+            status.context_length = native.context_length;
+            status.last_error = None;
+        }
+        NativeRuntimePhase::Error => {
+            status.last_error = native.message.clone();
+        }
+        NativeRuntimePhase::Stopped | NativeRuntimePhase::Stopping => {}
+    }
+
+    Ok(status)
 }
 
 #[tauri::command]
@@ -390,6 +420,119 @@ fn estimate_model_load(
     })
 }
 
+
+fn default_llama_server_name() -> &'static str {
+    if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    }
+}
+
+fn is_bare_executable(value: &str) -> bool {
+    let path = Path::new(value);
+    path.components().count() == 1 && !value.contains('/') && !value.contains('\\')
+}
+
+fn resolve_llama_server_path(
+    app: &AppHandle,
+    requested: Option<&str>,
+) -> Result<PathBuf, String> {
+    let executable_name = default_llama_server_name();
+    if let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+        if is_bare_executable(requested) {
+            return Ok(PathBuf::from(requested));
+        }
+        let path = Path::new(requested);
+        if !path.is_file() {
+            return Err(format!(
+                "llama.cpp executable was not found at {}",
+                path.display()
+            ));
+        }
+        return std::fs::canonicalize(path).map_err(|error| {
+            format!("llama.cpp executable could not be resolved: {error}")
+        });
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("runtime").join(executable_name));
+        candidates.push(resource_dir.join(executable_name));
+    }
+    for candidate in candidates {
+        if candidate.is_file() {
+            return std::fs::canonicalize(&candidate).map_err(|error| {
+                format!("bundled llama.cpp executable could not be resolved: {error}")
+            });
+        }
+    }
+
+    Ok(PathBuf::from(executable_name))
+}
+
+#[tauri::command]
+fn native_runtime_status(
+    state: State<'_, DesktopState>,
+) -> Result<NativeRuntimeStatus, String> {
+    state
+        .native_runtime
+        .status()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn start_native_model(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+    request: NativeModelStartRequest,
+) -> Result<NativeRuntimeStatus, String> {
+    let model_id = request.model_id.trim().to_owned();
+    if model_id.is_empty() {
+        return Err("a local GGUF model must be selected first".to_owned());
+    }
+
+    let stored_model = state
+        .database
+        .get_model(&model_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "model does not exist; scan the library again".to_owned())?;
+    let scanned = inspect_gguf_model(&stored_model.file_path)
+        .map_err(|error| error.to_string())?;
+    if scanned.descriptor.id != stored_model.id
+        || scanned.descriptor.file_size_bytes != stored_model.file_size_bytes
+        || stored_model
+            .metadata_hash
+            .as_deref()
+            .is_some_and(|hash| hash != scanned.metadata_hash)
+    {
+        return Err(
+            "model file or metadata changed since the last scan; scan the library again"
+                .to_owned(),
+        );
+    }
+
+    let profile = LoadProfile::for_preset(request.preset);
+    MemoryEstimate::for_model(&scanned.descriptor, &profile)
+        .map_err(|error| error.to_string())?;
+    let executable = resolve_llama_server_path(&app, request.runtime_path.as_deref())?;
+    let runtime = Arc::clone(&state.native_runtime);
+    runtime
+        .start(executable, scanned.descriptor, profile)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn stop_native_model(
+    state: State<'_, DesktopState>,
+) -> Result<NativeRuntimeStatus, String> {
+    state
+        .native_runtime
+        .stop()
+        .map_err(|error| error.to_string())
+}
+
 fn model_record_from_scan(
     library_id: &str,
     scanned: &ScannedModel,
@@ -610,9 +753,14 @@ pub fn run() {
     if let Err(error) = tauri::Builder::default()
         .setup(move |app| -> Result<(), Box<dyn std::error::Error>> {
             let database = initialize_database(app.handle())?;
+            let native_runtime = Arc::new(
+                LlamaServerRuntime::new()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+            );
             app.manage(DesktopState {
                 core: Arc::clone(&core),
                 database: Arc::new(database),
+                native_runtime,
             });
             Ok(())
         })
@@ -634,6 +782,9 @@ pub fn run() {
             save_model_profile,
             delete_model_profile,
             estimate_model_load,
+            native_runtime_status,
+            start_native_model,
+            stop_native_model,
             start_chat,
             list_provider_models,
             inspect_provider,
