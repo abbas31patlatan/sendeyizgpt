@@ -92,8 +92,10 @@ it available on PATH; the app will not silently replace a failed native path wit
 a remote provider.
 
 After launch, verify the Model library status reaches **Ready** and that the
-chat route points to the reported loopback `/v1` endpoint. Stop and reload the
-model to exercise process cleanup and generation-safe restart behavior.
+chat route points to the reported loopback `/v1` endpoint. The runtime panel
+should show real prompt/generation counters and throughput after a request;
+missing device telemetry must remain unavailable. Stop and reload the model to
+exercise process cleanup and generation-safe restart behavior.
 
 ## Windows build
 

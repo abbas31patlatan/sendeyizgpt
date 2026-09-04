@@ -26,6 +26,20 @@ export const NativeRuntimePhaseSchema = z.enum([
 
 export type NativeRuntimePhase = z.infer<typeof NativeRuntimePhaseSchema>;
 
+export const NativeRuntimeMetricsSchema = z.object({
+  promptTokensTotal: z.number().int().nonnegative().nullable(),
+  promptSecondsTotal: z.number().nonnegative().nullable(),
+  promptTokensPerSecond: z.number().nonnegative().nullable(),
+  predictedTokensTotal: z.number().int().nonnegative().nullable(),
+  predictedSecondsTotal: z.number().nonnegative().nullable(),
+  predictedTokensPerSecond: z.number().nonnegative().nullable(),
+  requestsProcessing: z.number().int().nonnegative().nullable(),
+  requestsDeferred: z.number().int().nonnegative().nullable(),
+  contextTokensMax: z.number().int().nonnegative().nullable(),
+});
+
+export type NativeRuntimeMetrics = z.infer<typeof NativeRuntimeMetricsSchema>;
+
 export const NativeRuntimeStatusSchema = z.object({
   phase: NativeRuntimePhaseSchema,
   modelId: z.string().nullable(),
@@ -37,6 +51,7 @@ export const NativeRuntimeStatusSchema = z.object({
   contextLength: z.number().int().positive().nullable(),
   gpuOffloadPercent: z.number().int().min(0).max(100).nullable(),
   message: z.string().nullable(),
+  metrics: NativeRuntimeMetricsSchema.nullable(),
 });
 
 export type NativeRuntimeStatus = z.infer<typeof NativeRuntimeStatusSchema>;
@@ -307,6 +322,7 @@ export const initialNativeRuntimeStatus: NativeRuntimeStatus = {
   contextLength: null,
   gpuOffloadPercent: null,
   message: null,
+  metrics: null,
 };
 
 export const initialUnavailableStatus: RuntimeStatus = {

@@ -106,7 +106,10 @@ LM Studio:
 
 The packaged Windows runtime is deliberately CPU-native and reproducible. GPU
 acceleration remains available through a user-selected compatible build so a
-driver/backend choice is never silently guessed.
+driver/backend choice is never silently guessed. When the native server exposes
+its Prometheus metrics endpoint, the runtime panel shows bounded prompt and
+generation throughput, token counters and queue state; unavailable telemetry is
+shown as unavailable rather than fabricated.
 
 ## Interface and performance
 

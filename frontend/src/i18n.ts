@@ -242,6 +242,15 @@ const en = {
   nativeRuntimePhaseError: "Runtime error",
   nativeRuntimeMissing:
     "llama-server was not found. Install the bundled package or choose its executable path.",
+  nativeRuntimeMetrics: "Live runtime metrics",
+  nativeRuntimeMetricsDescription:
+    "Reported by the native server. Missing values remain unavailable.",
+  nativeGenerationRate: "Generation throughput",
+  nativePromptRate: "Prompt throughput",
+  nativeGeneratedTokens: "Generated tokens",
+  nativePromptTokens: "Prompt tokens",
+  nativeRuntimeQueue: "Active / queued requests",
+  nativeContextHighWatermark: "Max context observed",
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -488,6 +497,15 @@ const tr: Record<TranslationKey, string> = {
   nativeRuntimePhaseError: "Çalışma zamanı hatası",
   nativeRuntimeMissing:
     "llama-server bulunamadı. Paketlenmiş sürümü kur veya çalıştırılabilir dosyanın yolunu seç.",
+  nativeRuntimeMetrics: "Canlı çalışma zamanı metrikleri",
+  nativeRuntimeMetricsDescription:
+    "Native sunucu tarafından raporlanır. Eksik değerler kullanılamıyor olarak kalır.",
+  nativeGenerationRate: "Üretim hızı",
+  nativePromptRate: "İstem işleme hızı",
+  nativeGeneratedTokens: "Üretilen token",
+  nativePromptTokens: "İstem token'ı",
+  nativeRuntimeQueue: "Aktif / kuyruktaki istekler",
+  nativeContextHighWatermark: "Gözlenen en yüksek bağlam",
 };
 
 export function translate(

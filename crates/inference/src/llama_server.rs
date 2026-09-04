@@ -1,4 +1,5 @@
 use super::{CacheQuantization, InferenceError, LoadProfile, ModelDescriptor, ModelFormat};
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -11,6 +12,7 @@ use tokio::time::sleep;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(300);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const MAX_METRICS_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,7 +25,21 @@ pub enum NativeRuntimePhase {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeRuntimeMetrics {
+    pub prompt_tokens_total: Option<u64>,
+    pub prompt_seconds_total: Option<f64>,
+    pub prompt_tokens_per_second: Option<f64>,
+    pub predicted_tokens_total: Option<u64>,
+    pub predicted_seconds_total: Option<f64>,
+    pub predicted_tokens_per_second: Option<f64>,
+    pub requests_processing: Option<u64>,
+    pub requests_deferred: Option<u64>,
+    pub context_tokens_max: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeRuntimeStatus {
     pub phase: NativeRuntimePhase,
@@ -36,6 +52,7 @@ pub struct NativeRuntimeStatus {
     pub context_length: Option<u32>,
     pub gpu_offload_percent: Option<u8>,
     pub message: Option<String>,
+    pub metrics: Option<NativeRuntimeMetrics>,
 }
 
 impl NativeRuntimeStatus {
@@ -51,6 +68,7 @@ impl NativeRuntimeStatus {
             context_length: None,
             gpu_offload_percent: None,
             message: None,
+            metrics: None,
         }
     }
 }
@@ -91,6 +109,50 @@ impl LlamaServerRuntime {
         let mut state = self.lock_state()?;
         Self::refresh_locked(&mut state)?;
         Ok(state.status.clone())
+    }
+
+    pub async fn status_with_metrics(&self) -> Result<NativeRuntimeStatus, InferenceError> {
+        let mut status = self.status()?;
+        if status.phase != NativeRuntimePhase::Ready {
+            return Ok(status);
+        }
+
+        let Some(endpoint) = status.endpoint.clone() else {
+            return Ok(status);
+        };
+
+        status.metrics = self.fetch_metrics(&endpoint).await.ok().flatten();
+        Ok(status)
+    }
+
+    async fn fetch_metrics(
+        &self,
+        endpoint: &str,
+    ) -> Result<Option<NativeRuntimeMetrics>, InferenceError> {
+        let response = self
+            .http
+            .get(format!("{endpoint}/metrics"))
+            .send()
+            .await
+            .map_err(|error| {
+                InferenceError::Backend(format!("native runtime metrics request: {error}"))
+            })?;
+
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+        ) {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(InferenceError::Backend(format!(
+                "native runtime metrics endpoint returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body = read_bounded_response(response).await?;
+        Ok(Some(parse_prometheus_metrics(&body)))
     }
 
     pub async fn start(
@@ -141,6 +203,7 @@ impl LlamaServerRuntime {
                 context_length: Some(profile.context_length),
                 gpu_offload_percent: Some(profile.gpu_offload_percent),
                 message: Some("starting the native llama.cpp server".to_owned()),
+                metrics: None,
             };
             generation
         };
@@ -343,6 +406,7 @@ impl LlamaServerRuntime {
         state.child.take();
         state.status.process_id = None;
         state.status.endpoint = None;
+        state.status.metrics = None;
         if exit.success() {
             state.status.phase = NativeRuntimePhase::Stopped;
             state.status.message = Some("llama.cpp server exited".to_owned());
@@ -369,6 +433,94 @@ impl Drop for LlamaServerRuntime {
             let _ = child.wait();
         }
     }
+}
+
+async fn read_bounded_response(response: reqwest::Response) -> Result<String, InferenceError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_METRICS_BYTES as u64)
+    {
+        return Err(InferenceError::Backend(
+            "native runtime metrics response is too large".to_owned(),
+        ));
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            InferenceError::Backend(format!("native runtime metrics response: {error}"))
+        })?;
+        if body.len().saturating_add(chunk.len()) > MAX_METRICS_BYTES {
+            return Err(InferenceError::Backend(
+                "native runtime metrics response is too large".to_owned(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body).map_err(|error| {
+        InferenceError::Backend(format!("native runtime metrics response is not UTF-8: {error}"))
+    })
+}
+
+fn parse_prometheus_metrics(body: &str) -> NativeRuntimeMetrics {
+    let mut metrics = NativeRuntimeMetrics::default();
+
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let mut fields = line.split_whitespace();
+        let Some(name_with_labels) = fields.next() else {
+            continue;
+        };
+        let Some(value) = fields.next().and_then(parse_metric_value) else {
+            continue;
+        };
+        let name = name_with_labels
+            .split('{')
+            .next()
+            .unwrap_or(name_with_labels);
+
+        match name {
+            "llamacpp:prompt_tokens_total" => metrics.prompt_tokens_total = metric_count(value),
+            "llamacpp:prompt_seconds_total" => metrics.prompt_seconds_total = metric_value(value),
+            "llamacpp:prompt_tokens_seconds" => {
+                metrics.prompt_tokens_per_second = metric_value(value)
+            }
+            "llamacpp:tokens_predicted_total" => {
+                metrics.predicted_tokens_total = metric_count(value)
+            }
+            "llamacpp:tokens_predicted_seconds_total" => {
+                metrics.predicted_seconds_total = metric_value(value)
+            }
+            "llamacpp:predicted_tokens_seconds" => {
+                metrics.predicted_tokens_per_second = metric_value(value)
+            }
+            "llamacpp:requests_processing" => metrics.requests_processing = metric_count(value),
+            "llamacpp:requests_deferred" => metrics.requests_deferred = metric_count(value),
+            "llamacpp:n_tokens_max" => metrics.context_tokens_max = metric_count(value),
+            _ => {}
+        }
+    }
+
+    metrics
+}
+
+fn parse_metric_value(value: &str) -> Option<f64> {
+    let value = value.parse::<f64>().ok()?;
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+fn metric_value(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
+fn metric_count(value: f64) -> Option<u64> {
+    (value <= u64::MAX as f64).then_some(value.round() as u64)
 }
 
 fn validate_native_model(model: &ModelDescriptor) -> Result<(), InferenceError> {
@@ -567,6 +719,44 @@ fn unix_now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prometheus_metrics_extract_known_values() {
+        let metrics = parse_prometheus_metrics(
+            r#"
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
+llamacpp:prompt_tokens_total 42
+llamacpp:prompt_seconds_total 1.25
+llamacpp:prompt_tokens_seconds 33.5
+llamacpp:tokens_predicted_total 18.0
+llamacpp:tokens_predicted_seconds_total 2.5
+llamacpp:predicted_tokens_seconds 7.2
+llamacpp:requests_processing{slot="0"} 1
+llamacpp:requests_deferred 2
+llamacpp:n_tokens_max 4096
+"#,
+        );
+
+        assert_eq!(metrics.prompt_tokens_total, Some(42));
+        assert_eq!(metrics.prompt_seconds_total, Some(1.25));
+        assert_eq!(metrics.prompt_tokens_per_second, Some(33.5));
+        assert_eq!(metrics.predicted_tokens_total, Some(18));
+        assert_eq!(metrics.predicted_seconds_total, Some(2.5));
+        assert_eq!(metrics.predicted_tokens_per_second, Some(7.2));
+        assert_eq!(metrics.requests_processing, Some(1));
+        assert_eq!(metrics.requests_deferred, Some(2));
+        assert_eq!(metrics.context_tokens_max, Some(4096));
+    }
+
+    #[test]
+    fn prometheus_metrics_ignore_invalid_and_unknown_values() {
+        let metrics = parse_prometheus_metrics(
+            "llamacpp:prompt_tokens_total NaN\nllamacpp:unknown 12\ninvalid-line",
+        );
+
+        assert_eq!(metrics.prompt_tokens_total, None);
+        assert_eq!(metrics.prompt_seconds_total, None);
+    }
 
     #[test]
     fn gpu_offload_uses_model_layer_count() {

@@ -325,6 +325,17 @@ function nativeRuntimePhaseKey(phase: NativeRuntimePhase): TranslationKey {
   }
 }
 
+function formatMetricRate(value: number | null, localeTag: string): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return value.toLocaleString(localeTag, { maximumFractionDigits: 1 }) + " tok/s";
+}
+
+function formatMetricCount(value: number | null, localeTag: string): string {
+  return value === null ? "—" : value.toLocaleString(localeTag);
+}
+
 function formatParameterCount(value: number | null, localeTag: string): string {
   if (value === null) {
     return "—";
@@ -2172,6 +2183,74 @@ function App() {
               <div className="native-runtime-detail">
                 <span>{tx("nativeRuntimeExecutable")}</span>
                 <code>{nativeRuntime.executablePath}</code>
+              </div>
+            )}
+            {nativeRuntime.metrics && (
+              <div className="native-runtime-metrics" aria-live="polite">
+                <div className="native-runtime-metrics-heading">
+                  <strong>{tx("nativeRuntimeMetrics")}</strong>
+                  <small>{tx("nativeRuntimeMetricsDescription")}</small>
+                </div>
+                <div className="native-runtime-metric-grid">
+                  <div>
+                    <strong>
+                      {formatMetricRate(
+                        nativeRuntime.metrics.predictedTokensPerSecond,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeGenerationRate")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricRate(
+                        nativeRuntime.metrics.promptTokensPerSecond,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativePromptRate")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.predictedTokensTotal,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeGeneratedTokens")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.promptTokensTotal,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativePromptTokens")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.requestsProcessing,
+                        localeTag,
+                      )}{" / "}
+                      {formatMetricCount(
+                        nativeRuntime.metrics.requestsDeferred,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeRuntimeQueue")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.contextTokensMax,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeContextHighWatermark")}</span>
+                  </div>
+                </div>
               </div>
             )}
             {(nativeRuntimeMessage || nativeRuntime.message) && (

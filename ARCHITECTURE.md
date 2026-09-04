@@ -251,13 +251,16 @@ sampling. The preset is never allowed to bypass memory validation.
 
 ### Resource and thermal telemetry
 
-Actual worker/runtime metrics are distinct from estimates. The runtime event
-schema can carry tokens/s, prompt tokens/s, TTFT, VRAM, RAM, CPU/GPU load,
-temperature, power when available and joules/generated-token when a reliable
-energy sample exists. Missing telemetry is represented as unavailable, never
-as zero. A thermal-aware policy may later lower concurrency or context; it
-never changes clocks, power limits, fan curves or voltage without a separate
-user-approved native feature.
+Actual worker/runtime metrics are distinct from estimates. The native M2b
+supervisor enables llama.cpp's Prometheus metrics endpoint and polls it through
+a bounded response reader. Known prompt/prediction counters, throughput gauges,
+active/deferred request counts and the observed context high-watermark are
+validated and surfaced in the bilingual runtime panel. Missing telemetry is
+represented as unavailable, never as zero. Device-specific VRAM/RAM, CPU/GPU
+load, temperature, power and joules/generated-token remain unavailable unless
+the selected runtime exposes a trustworthy source. A thermal-aware policy may
+later lower concurrency or context; it never changes clocks, power limits, fan
+curves or voltage without a separate user-approved native feature.
 
 ## G. Permission Broker design
 

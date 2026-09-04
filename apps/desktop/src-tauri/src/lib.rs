@@ -465,10 +465,13 @@ fn resolve_llama_server_path(app: &AppHandle, requested: Option<&str>) -> Result
 }
 
 #[tauri::command]
-fn native_runtime_status(state: State<'_, DesktopState>) -> Result<NativeRuntimeStatus, String> {
+async fn native_runtime_status(
+    state: State<'_, DesktopState>,
+) -> Result<NativeRuntimeStatus, String> {
     state
         .native_runtime
-        .status()
+        .status_with_metrics()
+        .await
         .map_err(|error| error.to_string())
 }
 

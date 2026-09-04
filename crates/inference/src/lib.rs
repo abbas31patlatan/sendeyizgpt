@@ -9,7 +9,9 @@ pub mod llama_server;
 pub use catalog::{
     ModelScanIssue, ModelScanReport, ScannedModel, inspect_gguf_model, scan_model_directory,
 };
-pub use llama_server::{LlamaServerRuntime, NativeRuntimePhase, NativeRuntimeStatus};
+pub use llama_server::{
+    LlamaServerRuntime, NativeRuntimeMetrics, NativeRuntimePhase, NativeRuntimeStatus,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
