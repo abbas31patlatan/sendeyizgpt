@@ -454,6 +454,7 @@ function App() {
   const [automationEnabledOnCreate, setAutomationEnabledOnCreate] = useState(false);
   const [automationMessage, setAutomationMessage] = useState<string | null>(null);
   const [automationBusy, setAutomationBusy] = useState(false);
+  const [editingAutomationId, setEditingAutomationId] = useState<string | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
   const [workspacePath, setWorkspacePath] = useState("");
   const [workspaceDiagnostics, setWorkspaceDiagnostics] =
@@ -1692,6 +1693,29 @@ function App() {
     setConnectionMessage(null);
   };
 
+  const resetAutomationForm = () => {
+    setEditingAutomationId(null);
+    setAutomationName("");
+    setAutomationPrompt("");
+    setAutomationIntervalMinutes(60);
+    setAutomationEnabledOnCreate(false);
+  };
+
+  const handleEditAutomation = (automation: Automation) => {
+    if (automation.lastStatus === "running") {
+      return;
+    }
+    setEditingAutomationId(automation.id);
+    setAutomationName(automation.name);
+    setAutomationPrompt(automation.prompt);
+    setAutomationIntervalMinutes(automation.intervalMinutes);
+    setAutomationEnabledOnCreate(automation.enabled);
+    setAutomationMessage(null);
+    window.requestAnimationFrame(() => {
+      document.getElementById("automation-name")?.focus();
+    });
+  };
+
   const handleCreateAutomation = async () => {
     const name = automationName.trim().slice(0, 256);
     const prompt = automationPrompt.trim();
@@ -1716,29 +1740,48 @@ function App() {
     setAutomationBusy(true);
     setAutomationMessage(null);
     const now = Date.now();
-    const automation: Automation = {
-      id: createId("automation"),
-      name,
-      prompt,
-      intervalMinutes,
-      enabled: automationEnabledOnCreate,
-      lastRunAt: null,
-      nextRunAt: automationEnabledOnCreate
-        ? now + intervalMinutes * 60_000
-        : null,
-      lastStatus: "idle",
-      lastError: null,
-      lastConversationId: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const existing = editingAutomationId
+      ? automations.find((item) => item.id === editingAutomationId)
+      : undefined;
+    const automation: Automation = existing
+      ? {
+          ...existing,
+          name,
+          prompt,
+          intervalMinutes,
+          enabled: automationEnabledOnCreate,
+          nextRunAt: automationEnabledOnCreate
+            ? now + intervalMinutes * 60_000
+            : null,
+          updatedAt: now,
+        }
+      : {
+          id: createId("automation"),
+          name,
+          prompt,
+          intervalMinutes,
+          enabled: automationEnabledOnCreate,
+          lastRunAt: null,
+          nextRunAt: automationEnabledOnCreate
+            ? now + intervalMinutes * 60_000
+            : null,
+          lastStatus: "idle",
+          lastError: null,
+          lastConversationId: null,
+          createdAt: now,
+          updatedAt: now,
+        };
     try {
       await saveAutomation(automation);
-      setAutomations((current) => [automation, ...current]);
-      setAutomationName("");
-      setAutomationPrompt("");
-      setAutomationEnabledOnCreate(false);
-      setAutomationMessage(tx("automationCreated"));
+      setAutomations((current) =>
+        existing
+          ? current.map((item) => (item.id === automation.id ? automation : item))
+          : [automation, ...current],
+      );
+      resetAutomationForm();
+      setAutomationMessage(
+        tx(existing ? "automationUpdated" : "automationCreated"),
+      );
     } catch (saveError) {
       setAutomationMessage(errorMessage(saveError));
     } finally {
@@ -1788,6 +1831,9 @@ function App() {
       setAutomations((current) =>
         current.filter((item) => item.id !== automation.id),
       );
+      if (editingAutomationId === automation.id) {
+        resetAutomationForm();
+      }
       setAutomationMessage(tx("automationDeleted"));
     } catch (deleteError) {
       setAutomationMessage(errorMessage(deleteError));
@@ -2719,7 +2765,11 @@ function App() {
       <section className="card automation-form-card">
         <div className="settings-heading">
           <div>
-            <div className="eyebrow">{tx("automationCenter")}</div>
+            <div className="eyebrow">
+              {editingAutomationId
+                ? tx("automationEdit")
+                : tx("automationCenter")}
+            </div>
             <h2>{tx("automationTitle")}</h2>
           </div>
           <span className="pill pill-blue">{tx("automationAppOpen")}</span>
@@ -2736,6 +2786,7 @@ function App() {
             <label>
               <span>{tx("automationName")}</span>
               <input
+                id="automation-name"
                 value={automationName}
                 onChange={(event) => setAutomationName(event.target.value)}
                 placeholder={tx("automationNamePlaceholder")}
@@ -2780,8 +2831,20 @@ function App() {
           </label>
           <div className="settings-actions">
             <button className="primary-button" type="submit" disabled={automationBusy}>
-              {tx("automationCreate")}
+              {editingAutomationId
+                ? tx("automationSaveChanges")
+                : tx("automationCreate")}
             </button>
+            {editingAutomationId && (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={resetAutomationForm}
+                disabled={automationBusy}
+              >
+                {tx("automationCancelEdit")}
+              </button>
+            )}
             {automationMessage && (
               <span className="connection-message" role="status">{automationMessage}</span>
             )}
@@ -2868,6 +2931,14 @@ function App() {
                     </div>
                   )}
                   <div className="automation-row-actions">
+                    <button
+                      className="secondary-button compact-button"
+                      type="button"
+                      onClick={() => handleEditAutomation(automation)}
+                      disabled={automationBusy || running}
+                    >
+                      {tx("automationEdit")}
+                    </button>
                     <button
                       className="primary-button compact-button"
                       type="button"
