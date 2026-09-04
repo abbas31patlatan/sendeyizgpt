@@ -193,7 +193,7 @@ impl OpenAiCompatibleClient {
         let http = reqwest::Client::builder()
             .user_agent("Aegis-AI/0.1")
             .connect_timeout(Duration::from_secs(5))
-            .read_timeout(Some(Duration::from_secs(120)))
+            .read_timeout(Duration::from_secs(120))
             .build()
             .map_err(|error| ProviderError::Client(error.to_string()))?;
         Ok(Self {
