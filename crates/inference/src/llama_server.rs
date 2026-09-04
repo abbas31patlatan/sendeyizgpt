@@ -1,4 +1,6 @@
-use super::{CacheQuantization, InferenceError, LoadProfile, ModelDescriptor, ModelFormat};
+use super::{
+    CacheQuantization, InferenceError, LoadProfile, ModelDescriptor, ModelFormat,
+};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -73,9 +75,7 @@ impl LlamaServerRuntime {
             .connect_timeout(Duration::from_millis(500))
             .timeout(Duration::from_secs(3))
             .build()
-            .map_err(|error| {
-                InferenceError::Backend(format!("native runtime HTTP client: {error}"))
-            })?;
+            .map_err(|error| InferenceError::Backend(format!("native runtime HTTP client: {error}")))?;
 
         Ok(Self {
             state: Mutex::new(RuntimeState {
@@ -268,9 +268,9 @@ impl LlamaServerRuntime {
     }
 
     fn lock_state(&self) -> Result<MutexGuard<'_, RuntimeState>, InferenceError> {
-        self.state.lock().map_err(|_| {
-            InferenceError::WorkerUnavailable("native runtime state lock poisoned".to_owned())
-        })
+        self.state
+            .lock()
+            .map_err(|_| InferenceError::WorkerUnavailable("native runtime state lock poisoned".to_owned()))
     }
 
     fn ensure_running(&self, generation: u64) -> Result<(), InferenceError> {
@@ -291,7 +291,11 @@ impl LlamaServerRuntime {
         Ok(())
     }
 
-    fn mark_start_error(&self, generation: u64, message: String) -> Result<(), InferenceError> {
+    fn mark_start_error(
+        &self,
+        generation: u64,
+        message: String,
+    ) -> Result<(), InferenceError> {
         let mut state = self.lock_state()?;
         if state.generation == generation {
             state.status.phase = NativeRuntimePhase::Error;
@@ -328,11 +332,13 @@ impl LlamaServerRuntime {
 
     fn refresh_locked(state: &mut RuntimeState) -> Result<(), InferenceError> {
         let exit = match state.child.as_mut() {
-            Some(child) => child.try_wait().map_err(|error| {
-                InferenceError::WorkerUnavailable(format!(
-                    "could not inspect the llama.cpp process: {error}"
-                ))
-            })?,
+            Some(child) => child
+                .try_wait()
+                .map_err(|error| {
+                    InferenceError::WorkerUnavailable(format!(
+                        "could not inspect the llama.cpp process: {error}"
+                    ))
+                })?,
             None => return Ok(()),
         };
 
@@ -383,7 +389,9 @@ fn validate_native_model(model: &ModelDescriptor) -> Result<(), InferenceError> 
         ));
     }
     let metadata = std::fs::metadata(&model.path).map_err(|error| {
-        InferenceError::IncompatibleModel(format!("the GGUF model file cannot be opened: {error}"))
+        InferenceError::IncompatibleModel(format!(
+            "the GGUF model file cannot be opened: {error}"
+        ))
     })?;
     if !metadata.is_file() {
         return Err(InferenceError::IncompatibleModel(
@@ -436,15 +444,12 @@ fn build_server_args(
 ) -> Result<Vec<OsString>, InferenceError> {
     let mut args = Vec::new();
     push_path_arg(&mut args, "--model", &model.path);
+    push_arg(&mut args, "--alias", &model.id);
     push_arg(&mut args, "--host", "127.0.0.1");
     push_arg(&mut args, "--port", port.to_string());
     push_arg(&mut args, "--ctx-size", profile.context_length.to_string());
     push_arg(&mut args, "--threads", profile.cpu_threads.to_string());
-    push_arg(
-        &mut args,
-        "--threads-batch",
-        profile.cpu_threads.to_string(),
-    );
+    push_arg(&mut args, "--threads-batch", profile.cpu_threads.to_string());
     push_arg(&mut args, "--batch-size", profile.batch_size.to_string());
     push_arg(
         &mut args,
@@ -494,11 +499,7 @@ fn build_server_args(
     push_arg(
         &mut args,
         "--reasoning",
-        if profile.reasoning_enabled {
-            "on"
-        } else {
-            "off"
-        },
+        if profile.reasoning_enabled { "on" } else { "off" },
     );
     if let Some(budget) = profile.reasoning_budget_tokens {
         push_arg(&mut args, "--reasoning-budget", budget.to_string());
@@ -516,6 +517,7 @@ fn build_server_args(
         push_arg(&mut args, "--seed", seed.to_string());
     }
 
+    args.push(OsString::from("--no-ui"));
     args.push(OsString::from("--metrics"));
     args.push(OsString::from("--offline"));
     args.push(OsString::from("--jinja"));
@@ -578,6 +580,41 @@ mod tests {
     fn q6_cache_is_rejected_until_the_cli_supports_it() {
         assert!(cache_type_name(CacheQuantization::Q6).is_err());
         assert_eq!(cache_type_name(CacheQuantization::Q8).expect("q8"), "q8_0");
+    }
+
+    #[test]
+    fn server_args_pin_model_alias_and_disable_web_ui() {
+        let model = ModelDescriptor {
+            id: "catalog-model-id".to_owned(),
+            display_name: "Catalog model".to_owned(),
+            path: PathBuf::from("model.gguf"),
+            format: ModelFormat::Gguf,
+            family: None,
+            parameter_count: None,
+            architecture: None,
+            quantization: None,
+            gguf_version: None,
+            file_size_bytes: 1,
+            context_capacity: None,
+            layer_count: None,
+            attention_head_count: None,
+            key_value_head_count: None,
+            embedding_length: None,
+            bits_per_weight: None,
+            capabilities: Default::default(),
+        };
+        let args = build_server_args(&model, &LoadProfile::eco(), 45_678)
+            .expect("server args");
+        let args = args
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let alias_index = args
+            .iter()
+            .position(|value| value == "--alias")
+            .expect("alias");
+        assert_eq!(args[alias_index + 1], model.id);
+        assert!(args.iter().any(|value| value == "--no-ui"));
     }
 
     #[test]
