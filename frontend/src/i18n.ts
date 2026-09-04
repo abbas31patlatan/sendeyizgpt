@@ -73,7 +73,7 @@ const en = {
     "Plain HTTP is accepted only for loopback addresses. Use HTTPS for every remote provider.",
   designedNotFaked: "Designed, not faked",
   roadmapDescription:
-    "This surface is part of the product roadmap. Native boundaries are ready; scoped workspaces, audit views and inspectable automations arrive in the next slices.",
+    "Native boundaries are ready. Use the model library, workspaces and automation center to build a private local workflow.",
   returnToChat: "Return to chat",
   noModelSelected: "No model selected",
   selectedModel: "selected model",
@@ -252,6 +252,8 @@ const en = {
   nativeRuntimeQueue: "Active / queued requests",
   nativeContextHighWatermark: "Max context observed",
   automationCenter: "Automation center",
+  automationAppOpen: "RUNS WHILE APP IS OPEN",
+  automationSchedule: "Scheduled routines",
   automationTitle: "Turn repeatable prompts into local routines",
   automationDescription:
     "Save a prompt once, run it through the active provider and optionally repeat it while Aegis is open. Each run becomes a normal conversation you can inspect.",
@@ -382,7 +384,7 @@ const tr: Record<TranslationKey, string> = {
     "Düz HTTP yalnızca yerel döngü adreslerinde kabul edilir. Uzak sağlayıcılarda mutlaka HTTPS kullan.",
   designedNotFaked: "Tasarlanmış, taklit edilmemiş",
   roadmapDescription:
-    "Bu ekran ürün yol haritasının parçası. Yerel sınırlar hazır; kapsamlı çalışma alanları, denetim görünümü ve incelenebilir otomasyonlar sonraki dilimlerde gelecek.",
+    "Yerel sınırlar hazır. Model kütüphanesi, çalışma alanları ve otomasyon merkeziyle özel yerel iş akışını kur.",
   returnToChat: "Sohbete dön",
   noModelSelected: "Model seçilmedi",
   selectedModel: "seçili model",
@@ -561,6 +563,8 @@ const tr: Record<TranslationKey, string> = {
   nativeRuntimeQueue: "Aktif / kuyruktaki istekler",
   nativeContextHighWatermark: "Gözlenen en yüksek bağlam",
   automationCenter: "Otomasyon merkezi",
+  automationAppOpen: "UYGULAMA AÇIKKEN ÇALIŞIR",
+  automationSchedule: "Zamanlanmış rutinler",
   automationTitle: "Tekrarlanan istemleri yerel rutinlere dönüştür",
   automationDescription:
     "Bir istemi bir kez kaydet, etkin sağlayıcı üzerinden çalıştır ve Aegis açıkken isteğe bağlı olarak tekrarla. Her çalışma inceleyebileceğin normal bir konuşma olur.",
