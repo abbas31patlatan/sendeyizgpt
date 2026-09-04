@@ -47,7 +47,6 @@ pub struct WorkspaceRecord {
 }
 
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelLibraryRecord {
@@ -390,24 +389,23 @@ impl Database {
             .optional()
             .map_err(DatabaseError::Repository)?;
 
-        row.map(|(id, name, root_path, enabled, last_scan_at, created_at, updated_at)| {
-            Ok(ModelLibraryRecord {
-                id,
-                name,
-                root_path,
-                enabled: bool_from_sql(enabled, "model library enabled")?,
-                last_scan_at: optional_timestamp(last_scan_at)?,
-                created_at: parse_timestamp(&created_at)?,
-                updated_at: parse_timestamp(&updated_at)?,
-            })
-        })
+        row.map(
+            |(id, name, root_path, enabled, last_scan_at, created_at, updated_at)| {
+                Ok(ModelLibraryRecord {
+                    id,
+                    name,
+                    root_path,
+                    enabled: bool_from_sql(enabled, "model library enabled")?,
+                    last_scan_at: optional_timestamp(last_scan_at)?,
+                    created_at: parse_timestamp(&created_at)?,
+                    updated_at: parse_timestamp(&updated_at)?,
+                })
+            },
+        )
         .transpose()
     }
 
-    pub fn save_model_library(
-        &self,
-        library: &ModelLibraryRecord,
-    ) -> Result<(), DatabaseError> {
+    pub fn save_model_library(&self, library: &ModelLibraryRecord) -> Result<(), DatabaseError> {
         validate_model_library(library)?;
         let connection = self
             .connection
@@ -457,10 +455,7 @@ impl Database {
         Ok(deleted > 0)
     }
 
-    pub fn list_models(
-        &self,
-        library_id: Option<&str>,
-    ) -> Result<Vec<ModelRecord>, DatabaseError> {
+    pub fn list_models(&self, library_id: Option<&str>) -> Result<Vec<ModelRecord>, DatabaseError> {
         if let Some(library_id) = library_id {
             validate_id(library_id, "model library id")?;
         }
@@ -667,10 +662,7 @@ impl Database {
         .collect()
     }
 
-    pub fn save_model_profile(
-        &self,
-        profile: &ModelProfileRecord,
-    ) -> Result<(), DatabaseError> {
+    pub fn save_model_profile(&self, profile: &ModelProfileRecord) -> Result<(), DatabaseError> {
         validate_model_profile(profile)?;
         let connection = self
             .connection
@@ -715,7 +707,6 @@ impl Database {
             .map_err(DatabaseError::Repository)?;
         Ok(deleted > 0)
     }
-
 }
 
 fn read_messages(
@@ -869,9 +860,7 @@ fn validate_model_library(library: &ModelLibraryRecord) -> Result<(), DatabaseEr
             "model library name is empty or too long".to_owned(),
         ));
     }
-    if library.root_path.trim().is_empty()
-        || library.root_path.len() > MAX_WORKSPACE_PATH_BYTES
-    {
+    if library.root_path.trim().is_empty() || library.root_path.len() > MAX_WORKSPACE_PATH_BYTES {
         return Err(DatabaseError::InvalidData(
             "model library path is empty or too long".to_owned(),
         ));
@@ -940,7 +929,9 @@ fn validate_model_profile(profile: &ModelProfileRecord) -> Result<(), DatabaseEr
         ));
     }
     serde_json::from_str::<serde_json::Value>(&profile.config_json).map_err(|error| {
-        DatabaseError::InvalidData(format!("model profile configuration is not valid JSON: {error}"))
+        DatabaseError::InvalidData(format!(
+            "model profile configuration is not valid JSON: {error}"
+        ))
     })?;
     if let Some(model_id) = &profile.model_id {
         validate_id(model_id, "model profile model id")?;
@@ -951,9 +942,8 @@ fn validate_model_profile(profile: &ModelProfileRecord) -> Result<(), DatabaseEr
 fn optional_u64(value: Option<i64>, label: &str) -> Result<Option<u64>, DatabaseError> {
     value
         .map(|value| {
-            u64::try_from(value).map_err(|_| {
-                DatabaseError::InvalidData(format!("{label} cannot be negative"))
-            })
+            u64::try_from(value)
+                .map_err(|_| DatabaseError::InvalidData(format!("{label} cannot be negative")))
         })
         .transpose()
 }
@@ -1352,7 +1342,9 @@ mod tests {
         let libraries = database.list_model_libraries().expect("libraries load");
         assert_eq!(libraries.len(), 1);
         assert_eq!(libraries[0].last_scan_at, Some(1_700_000_000_100));
-        let models = database.list_models(Some(&library.id)).expect("models load");
+        let models = database
+            .list_models(Some(&library.id))
+            .expect("models load");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].display_name, model.display_name);
         assert_eq!(models[0].metadata_json, "{}");
@@ -1360,6 +1352,11 @@ mod tests {
         database
             .replace_model_library_models(&library.id, &[], 1_700_000_000_200)
             .expect("empty snapshot saves");
-        assert!(database.list_models(None).expect("models reload").is_empty());
+        assert!(
+            database
+                .list_models(None)
+                .expect("models reload")
+                .is_empty()
+        );
     }
 }

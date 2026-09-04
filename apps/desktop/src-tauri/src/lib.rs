@@ -1,11 +1,11 @@
 use aegis_core::{ApplicationCore, RuntimeStatus};
-use aegis_inference::{
-    inspect_gguf_model, scan_model_directory, LoadPreset, LoadProfile, MemoryEstimate,
-    ModelFormat, ScannedModel,
-};
 use aegis_database::{
     ConversationRecord, Database, ModelLibraryRecord, ModelProfileRecord, ModelRecord,
     WorkspaceRecord,
+};
+use aegis_inference::{
+    LoadPreset, LoadProfile, MemoryEstimate, ModelFormat, ScannedModel, inspect_gguf_model,
+    scan_model_directory,
 };
 use aegis_providers::{
     ChatChunk, ChatCompletionSummary, ChatRequest, OpenAiCompatibleClient, ProviderConfig,
@@ -82,7 +82,6 @@ struct WorkspacePathDiagnostics {
     canonical_path: Option<String>,
     error: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -219,9 +218,7 @@ fn validate_workspace_path(path: String) -> WorkspacePathDiagnostics {
 
 
 #[tauri::command]
-fn load_model_libraries(
-    state: State<'_, DesktopState>,
-) -> Result<Vec<ModelLibraryRecord>, String> {
+fn load_model_libraries(state: State<'_, DesktopState>) -> Result<Vec<ModelLibraryRecord>, String> {
     state
         .database
         .list_model_libraries()
@@ -261,7 +258,10 @@ fn delete_model_library(
 
 #[tauri::command]
 fn load_local_models(state: State<'_, DesktopState>) -> Result<Vec<ModelRecord>, String> {
-    state.database.list_models(None).map_err(|error| error.to_string())
+    state
+        .database
+        .list_models(None)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -331,9 +331,7 @@ async fn scan_model_library(
 }
 
 #[tauri::command]
-fn load_model_profiles(
-    state: State<'_, DesktopState>,
-) -> Result<Vec<ModelProfileRecord>, String> {
+fn load_model_profiles(state: State<'_, DesktopState>) -> Result<Vec<ModelProfileRecord>, String> {
     state
         .database
         .list_model_profiles()

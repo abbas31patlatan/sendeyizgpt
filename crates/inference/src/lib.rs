@@ -3,6 +3,12 @@
 //! No C/C++ backend is linked here. A worker adapter will implement this trait
 //! for a supervised llama.cpp process first, then for future runtimes.
 
+pub mod catalog;
+
+pub use catalog::{
+    inspect_gguf_model, scan_model_directory, ModelScanIssue, ModelScanReport, ScannedModel,
+};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
