@@ -460,7 +460,9 @@ async fn read_bounded_response(response: reqwest::Response) -> Result<String, In
     }
 
     String::from_utf8(body).map_err(|error| {
-        InferenceError::Backend(format!("native runtime metrics response is not UTF-8: {error}"))
+        InferenceError::Backend(format!(
+            "native runtime metrics response is not UTF-8: {error}"
+        ))
     })
 }
 
