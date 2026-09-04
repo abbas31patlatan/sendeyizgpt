@@ -2,7 +2,8 @@
 
 The Windows packaging workflow builds llama-server.exe from the official
 [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) source at the pinned
-commit recorded in LLAMA_CPP_BUILD.txt. Generated binaries and build metadata
+commit recorded in LLAMA_CPP_BUILD.txt. The upstream `LICENSE` is copied as
+LLAMA_CPP_LICENSE.txt. Generated binaries, license staging and build metadata
 are intentionally ignored by Git and are copied into Tauri resources during
 release packaging.
 

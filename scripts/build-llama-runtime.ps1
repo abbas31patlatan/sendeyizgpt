@@ -17,6 +17,8 @@ $sourceRoot = Join-Path $projectRoot "build\llama.cpp"
 $buildRoot = Join-Path $projectRoot "build\llama-build"
 $runtimePath = Join-Path $OutputDirectory "llama-server.exe"
 $manifestPath = Join-Path $OutputDirectory "LLAMA_CPP_BUILD.txt"
+$licensePath = Join-Path $sourceRoot "LICENSE"
+$runtimeLicensePath = Join-Path $OutputDirectory "LLAMA_CPP_LICENSE.txt"
 $llamaCppCommit = "427291b5b34cd914a31b3fd3b61a68f6184f4b9f"
 $llamaCppRepository = "https://github.com/ggml-org/llama.cpp.git"
 
@@ -39,6 +41,7 @@ Require-Command "cmake" "Install CMake and the Visual Studio C++ workload."
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 if (-not $Force -and (Test-Path -LiteralPath $runtimePath -PathType Leaf) -and
     (Test-Path -LiteralPath $manifestPath -PathType Leaf) -and
+    (Test-Path -LiteralPath $runtimeLicensePath -PathType Leaf) -and
     ((Get-Content -LiteralPath $manifestPath -Raw) -match [regex]::Escape($llamaCppCommit))) {
     Write-Host "Pinned llama.cpp runtime already exists: $runtimePath" -ForegroundColor Green
     return
@@ -81,11 +84,16 @@ if ($null -eq $builtRuntime) {
     throw "CMake completed but llama-server.exe was not found under $buildRoot"
 }
 Copy-Item -LiteralPath $builtRuntime.FullName -Destination $runtimePath -Force
+if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
+    throw "Pinned llama.cpp checkout does not contain LICENSE: $licensePath"
+}
+Copy-Item -LiteralPath $licensePath -Destination $runtimeLicensePath -Force
 $manifest = @(
     "repository=$llamaCppRepository"
     "commit=$llamaCppCommit"
     "configuration=Release; static; CPU portable; Vulkan/CUDA/HIP disabled"
     "source=$sourceRoot"
+    "license=LLAMA_CPP_LICENSE.txt"
     "built=$([DateTime]::UtcNow.ToString('o'))"
 )
 $manifest | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM

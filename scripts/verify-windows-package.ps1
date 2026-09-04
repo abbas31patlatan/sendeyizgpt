@@ -27,11 +27,15 @@ New-Item -ItemType Directory -Path $artifactRoot | Out-Null
 $runtimeRoot = Join-Path $projectRoot "apps\desktop\src-tauri\runtime"
 $runtime = Join-Path $runtimeRoot "llama-server.exe"
 $runtimeMetadata = Join-Path $runtimeRoot "LLAMA_CPP_BUILD.txt"
+$runtimeLicense = Join-Path $runtimeRoot "LLAMA_CPP_LICENSE.txt"
 if (-not (Test-Path -LiteralPath $runtime -PathType Leaf)) {
     throw "The native llama.cpp runtime was not built: $runtime"
 }
 if (-not (Test-Path -LiteralPath $runtimeMetadata -PathType Leaf)) {
     throw "The native llama.cpp build manifest was not created: $runtimeMetadata"
+}
+if (-not (Test-Path -LiteralPath $runtimeLicense -PathType Leaf)) {
+    throw "The upstream llama.cpp license was not staged: $runtimeLicense"
 }
 
 $packagedRuntime = Get-ChildItem -LiteralPath $targetRoot -Recurse -File -Filter "llama-server.exe" |
@@ -43,6 +47,17 @@ $sourceRuntimeHash = (Get-FileHash -LiteralPath $runtime -Algorithm SHA256).Hash
 $packagedRuntimeHash = (Get-FileHash -LiteralPath $packagedRuntime.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($sourceRuntimeHash -ne $packagedRuntimeHash) {
     throw "Packaged llama-server.exe hash does not match the built runtime"
+}
+
+$packagedLicense = Get-ChildItem -LiteralPath $targetRoot -Recurse -File -Filter "LLAMA_CPP_LICENSE.txt" |
+    Select-Object -First 1
+if ($null -eq $packagedLicense) {
+    throw "Tauri did not copy the upstream llama.cpp license into release resources"
+}
+$sourceLicenseHash = (Get-FileHash -LiteralPath $runtimeLicense -Algorithm SHA256).Hash.ToLowerInvariant()
+$packagedLicenseHash = (Get-FileHash -LiteralPath $packagedLicense.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($sourceLicenseHash -ne $packagedLicenseHash) {
+    throw "Packaged llama.cpp license hash does not match the source license"
 }
 
 $manifest = foreach ($installer in $installers) {
@@ -66,6 +81,14 @@ $manifest += [PSCustomObject]@{
 }
 
 Copy-Item -LiteralPath $runtimeMetadata -Destination (Join-Path $artifactRoot "LLAMA_CPP_BUILD.txt")
+$runtimeLicenseInfo = Get-Item -LiteralPath $runtimeLicense
+Copy-Item -LiteralPath $runtimeLicense -Destination (Join-Path $artifactRoot "LLAMA_CPP_LICENSE.txt")
+$manifest += [PSCustomObject]@{
+    File = "LLAMA_CPP_LICENSE.txt"
+    SizeBytes = $runtimeLicenseInfo.Length
+    Sha256 = $sourceLicenseHash
+}
+
 $runtimeMetadataInfo = Get-Item -LiteralPath $runtimeMetadata
 $runtimeMetadataHash = Get-FileHash -LiteralPath $runtimeMetadata -Algorithm SHA256
 $manifest += [PSCustomObject]@{
