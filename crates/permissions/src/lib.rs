@@ -126,7 +126,7 @@ pub struct CommandPreview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "target_kind", rename_all = "snake_case")]
 pub enum ActionTarget {
     None,
     Path {

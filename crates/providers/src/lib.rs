@@ -8,10 +8,10 @@ use futures_util::StreamExt;
 use reqwest::{Response, header};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use url::Url;
+use url::{Host, Url};
 
 const MAX_MESSAGES: usize = 128;
 const MAX_MESSAGE_BYTES: usize = 256 * 1024;
@@ -57,6 +57,11 @@ impl ProviderConfig {
         if !matches!(url.scheme(), "http" | "https") {
             return Err(ProviderError::InvalidConfig(
                 "base URL must use http or https".to_owned(),
+            ));
+        }
+        if url.scheme() == "http" && !is_loopback_host(&url) {
+            return Err(ProviderError::InvalidConfig(
+                "plain HTTP is allowed only for a loopback local provider".to_owned(),
             ));
         }
         if url.host_str().is_none() {
@@ -187,6 +192,8 @@ impl OpenAiCompatibleClient {
         let base_url = config.validate()?;
         let http = reqwest::Client::builder()
             .user_agent("Aegis-AI/0.1")
+            .connect_timeout(Duration::from_secs(5))
+            .read_timeout(Some(Duration::from_secs(120)))
             .build()
             .map_err(|error| ProviderError::Client(error.to_string()))?;
         Ok(Self {
@@ -318,6 +325,15 @@ impl OpenAiCompatibleClient {
             }
             _ => request,
         }
+    }
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -566,6 +582,12 @@ mod tests {
     fn rejects_credentials_in_url_and_empty_messages() {
         let mut invalid = config();
         invalid.base_url = "https://user:secret@example.test/v1".to_owned();
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProviderError::InvalidConfig(_))
+        ));
+
+        invalid.base_url = "http://example.test/v1".to_owned();
         assert!(matches!(
             invalid.validate(),
             Err(ProviderError::InvalidConfig(_))
