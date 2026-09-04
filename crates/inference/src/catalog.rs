@@ -669,7 +669,7 @@ mod tests {
         bytes.extend_from_slice(GGUF_MAGIC);
         push_u32(&mut bytes, GGUF_VERSION_V3);
         push_u64(&mut bytes, 0);
-        push_u64(&mut bytes, 7);
+        push_u64(&mut bytes, 8);
         for (key, value) in entries {
             push_string_value(&mut bytes, key, value);
         }

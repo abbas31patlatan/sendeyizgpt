@@ -499,11 +499,11 @@ impl Database {
                  FROM models
                  WHERE id = ?1",
                 params![model_id],
-                |row| model_row(row),
+                model_row,
             )
             .optional()
             .map_err(DatabaseError::Repository)?
-            .map(|row| model_from_row(row))
+            .map(model_from_row)
             .transpose()
     }
 
