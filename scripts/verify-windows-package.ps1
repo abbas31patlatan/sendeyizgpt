@@ -35,10 +35,9 @@ if (-not (Test-Path -LiteralPath $runtimeMetadata -PathType Leaf)) {
 }
 
 $packagedRuntime = Get-ChildItem -LiteralPath $targetRoot -Recurse -File -Filter "llama-server.exe" |
-    Where-Object { $_.FullName -match "[\\/]resources[\\/]runtime[\\/]" } |
     Select-Object -First 1
 if ($null -eq $packagedRuntime) {
-    throw "Tauri did not copy llama-server.exe into its resources/runtime directory"
+    throw "Tauri did not copy llama-server.exe into the release resources"
 }
 $sourceRuntimeHash = (Get-FileHash -LiteralPath $runtime -Algorithm SHA256).Hash.ToLowerInvariant()
 $packagedRuntimeHash = (Get-FileHash -LiteralPath $packagedRuntime.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
