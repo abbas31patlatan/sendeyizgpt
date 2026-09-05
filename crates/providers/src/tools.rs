@@ -476,9 +476,11 @@ fn parse_search_results(html: &str, maximum: usize) -> Vec<SearchResult> {
                 html[start..]
                     .to_ascii_lowercase()
                     .find('<')
-                    .map(|offset| start + offset)
+                    .map(|offset| (start, start + offset))
             })
-            .map(|end| normalize_whitespace(&strip_tags(&decode_html_entities(&html[start..end]))))
+            .map(|(start, end)| {
+                normalize_whitespace(&strip_tags(&decode_html_entities(&html[start..end])))
+            })
             .unwrap_or_default();
         if !title.is_empty() && !results.iter().any(|item: &SearchResult| item.url == url) {
             results.push(SearchResult {
