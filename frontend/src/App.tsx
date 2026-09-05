@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -7,6 +9,7 @@ import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   cancelOperation,
   discoverLocalModels,
@@ -18,7 +21,9 @@ import {
   estimateModelLoad,
   getRuntimeStatus,
   inspectProvider,
+  loadProviderModel,
   listenChatEvents,
+  listenModelChanges,
   loadAutomations,
   loadLocalModels,
   loadModelLibraries,
@@ -63,6 +68,9 @@ import {
   type WorkspacePathDiagnostics,
 } from "./protocol";
 import { translate, type Locale, type TranslationKey } from "./i18n";
+import { ToolActivity } from "./ToolActivity";
+
+const MessageContent = lazy(() => import("./MessageContent").then((module) => ({ default: module.MessageContent })));
 import "./chat.css";
 
 type View = "chats" | "workspaces" | "models" | "automations";
@@ -515,6 +523,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [modelOptions, setModelOptions] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [workerLoading, setWorkerLoading] = useState(false);
+  const [bindingModel, setBindingModel] = useState<string | null>(null);
   const [providerDiagnostics, setProviderDiagnostics] =
     useState<ProviderDiagnostics | null>(null);
   const [workerDiagnostics, setWorkerDiagnostics] =
@@ -988,11 +998,19 @@ function App() {
         });
     };
     const timer = window.setInterval(refresh, 60_000);
+    let changeTimer: number | undefined;
+    let unlisten: (() => void) | undefined;
+    void listenModelChanges(() => {
+      window.clearTimeout(changeTimer);
+      changeTimer = window.setTimeout(refresh, 1500);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
     document.addEventListener("visibilitychange", refresh);
     window.addEventListener("focus", refresh);
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      window.clearTimeout(changeTimer);
+      unlisten?.();
       document.removeEventListener("visibilitychange", refresh);
       window.removeEventListener("focus", refresh);
     };
@@ -1473,13 +1491,14 @@ function App() {
 
   const handleCheckWorkerConnection = async () => {
     setWorkerDiagnostics(null);
-    if (!settings.worker_base_url.trim() || !settings.worker_model.trim()) {
+    if (!settings.worker_base_url.trim()) {
       return;
     }
+    setWorkerLoading(true);
     try {
       const diagnostics = await inspectProvider({
         base_url: settings.worker_base_url.trim(),
-        model: settings.worker_model.trim(),
+        model: settings.worker_model.trim() || "default",
         api_key: settings.worker_api_key.trim() || undefined,
       });
       setWorkerDiagnostics(diagnostics);
@@ -1494,6 +1513,41 @@ function App() {
         error: errorMessage(workerError),
         retryable: false,
       });
+    } finally {
+      setWorkerLoading(false);
+    }
+  };
+
+  const handleBindProvider = async (model: ProviderModel, worker = false) => {
+    if (bindingModel || isStreaming) return;
+    const snapshot = {
+      base_url: (worker ? settings.worker_base_url : settings.base_url).trim(),
+      model: model.id,
+      api_key: (worker ? settings.worker_api_key : settings.api_key).trim() || undefined,
+    };
+    setBindingModel(model.id);
+    setConnectionMessage(tx("providerModelLoading", { model: model.display_name ?? model.id }));
+    try {
+      const id = model.load_via ? await loadProviderModel(snapshot, model.load_via) : model.id;
+      setSettings((current) => {
+        // A slow load must not replace a newer endpoint selected by the user.
+        if ((worker ? current.worker_base_url : current.base_url).trim() !== snapshot.base_url) return current;
+        return worker ? { ...current, worker_model: id } : { ...current, model: id };
+      });
+      setConnectionMessage(tx("providerModelReady", { model: id }));
+    } catch (loadError) {
+      setConnectionMessage(errorMessage(loadError));
+    } finally {
+      setBindingModel(null);
+    }
+  };
+
+  const handleBrowseModelLibrary = async () => {
+    try {
+      const path = await open({ directory: true, multiple: false, title: tx("browseModelFolder") });
+      if (typeof path === "string") await handleRegisterModelLibrary(path);
+    } catch (browseError) {
+      setModelLibraryMessage(errorMessage(browseError));
     }
   };
 
@@ -1550,8 +1604,8 @@ function App() {
     }
   };
 
-  const handleRegisterModelLibrary = async () => {
-    const path = modelLibraryPath.trim();
+  const handleRegisterModelLibrary = async (selectedPath?: string) => {
+    const path = (selectedPath ?? modelLibraryPath).trim();
     if (!path) {
       setModelLibraryMessage(tx("modelLibraryPathRequired"));
       return;
@@ -1566,6 +1620,12 @@ function App() {
         return;
       }
       const canonicalPath = diagnostics.canonicalPath ?? path;
+      const registered = modelLibraries.find((library) => library.rootPath === canonicalPath);
+      if (registered) {
+        applyModelScan(await scanModelLibrary(registered.id));
+        setModelLibraryMessage(tx("directoryReady"));
+        return;
+      }
       const pathParts = canonicalPath.split(/[\\/]/).filter(Boolean);
       const fallbackName = pathParts[pathParts.length - 1] ?? tx("modelLibraryDefaultName");
       const now = Date.now();
@@ -1710,12 +1770,7 @@ function App() {
   };
 
   const handleQuickBindModel = async (model: LocalModel) => {
-    if (nativeRuntimeBusy || nativeRuntime.phase === "ready") {
-      setNativeRuntimeMessage(
-        nativeRuntime.phase === "ready"
-          ? tx("nativeRuntimeUnloadFirst")
-          : tx("loadingNativeModel"),
-      );
+    if (nativeRuntimeBusy || isStreaming) {
       return;
     }
     setSelectedLocalModelId(model.id);
@@ -1724,6 +1779,15 @@ function App() {
     try {
       const estimate = await estimateModelLoad(model.id, loadPreset);
       setLoadEstimate(estimate);
+      if (nativeRuntime.phase === "ready" && nativeRuntime.modelId !== model.id) {
+        setNativeRuntime(await stopNativeModel());
+        setSettings((current) => ({ ...current, model: "" }));
+      }
+      if (nativeRuntime.phase === "ready" && nativeRuntime.modelId === model.id && nativeRuntime.endpoint) {
+        setSettings((current) => ({ ...current, model: model.id, base_url: nativeRuntime.endpoint!.replace(/\/+$/, "") + "/v1", api_key: "" }));
+        setNativeRuntimeMessage(tx("nativeModelReady"));
+        return;
+      }
       const status = await startNativeModel({
         modelId: model.id,
         preset: loadPreset,
@@ -2165,13 +2229,7 @@ function App() {
             </div>
             <div className="message-bubble">
               {message.toolActivity && message.toolActivity.length > 0 && (
-                <div className="tool-activity" aria-label={tx("toolActivity")}>
-                  {message.toolActivity.map((activity, index) => (
-                    <span className="tool-activity-item" key={activity + index}>
-                      <span aria-hidden="true">⚙</span> {activity}
-                    </span>
-                  ))}
-                </div>
+                <ToolActivity items={message.toolActivity} locale={uiPreferences.locale} />
               )}
               {message.reasoning && (
                 <details className="reasoning-block" open={message.status === "streaming"}>
@@ -2180,7 +2238,9 @@ function App() {
                 </details>
               )}
               <div className="message-content">
-                {message.content || (message.status === "streaming" ? "…" : "")}
+                {message.role === "assistant" && message.content
+                  ? <Suspense fallback={message.content}><MessageContent text={message.content} locale={uiPreferences.locale} /></Suspense>
+                  : message.content || (message.status === "streaming" ? "…" : "")}
               </div>
             </div>
           </article>
@@ -2482,6 +2542,11 @@ function App() {
           </label>
           {settings.worker_enabled && (
             <div className="worker-routing-grid">
+              <button type="button" className="secondary-button setting-wide" disabled={workerLoading || !!bindingModel}
+                onClick={() => {
+                  setSettings((current) => ({ ...current, worker_base_url: current.base_url, worker_api_key: current.api_key }));
+                  setWorkerDiagnostics(null);
+                }}>{tx("workerSameServer")}</button>
               <label>
                 <span>{tx("workerBaseUrl")}</span>
                 <input
@@ -2520,10 +2585,24 @@ function App() {
                 className="secondary-button worker-check-button"
                 type="button"
                 onClick={() => void handleCheckWorkerConnection()}
-                disabled={modelsLoading || !settings.worker_base_url.trim() || !settings.worker_model.trim()}
+                disabled={workerLoading || !!bindingModel || !settings.worker_base_url.trim()}
               >
-                {tx("checkWorker")}
+                {workerLoading ? tx("checking") : tx("checkWorker")}
               </button>
+              {workerDiagnostics && workerDiagnostics.models.length > 0 && (
+                <label className="setting-wide">
+                  <span>{tx("chooseWorkerModel")}</span>
+                  <select value={settings.worker_model} disabled={!!bindingModel || isStreaming}
+                    onChange={(event) => {
+                      const model = workerDiagnostics.models.find((item) => item.id === event.target.value);
+                      if (model) void handleBindProvider(model, true);
+                    }}>
+                    <option value="">{tx("noModelSelected")}</option>
+                    {workerDiagnostics.models.map((model) => <option key={model.id} value={model.id}>{model.display_name ?? model.id}</option>)}
+                  </select>
+                  <small>{tx("workerSelectionHelp")}</small>
+                </label>
+              )}
             </div>
           )}
           {workerDiagnostics && (
@@ -2531,7 +2610,7 @@ function App() {
               <span className="status-dot" />
               <span>{workerDiagnostics.status === "connected" ? tx("workerConnected") : tx("workerUnavailable")}</span>
               <small>
-                {Math.round(workerDiagnostics.latencyMs)} ms · {workerDiagnostics.modelCount} model
+                {Math.round(workerDiagnostics.latencyMs)} ms · {tx("modelsAvailable", { count: workerDiagnostics.modelCount })}
                 {workerDiagnostics.error ? " · " + workerDiagnostics.error : ""}
               </small>
             </div>
@@ -2605,12 +2684,14 @@ function App() {
                 className={"model-catalog-item " + (settings.model === model.id ? "is-selected" : "")}
                 type="button"
                 key={model.id}
-                onClick={() => setSettings((current) => ({ ...current, model: model.id }))}
+                onClick={() => void handleBindProvider(model)}
+                disabled={!!bindingModel || isStreaming}
+                aria-busy={bindingModel === model.id}
               >
                 <span className="model-catalog-icon" aria-hidden="true">◈</span>
                 <span className="model-catalog-copy">
-                  <strong>{model.id}</strong>
-                  <small>{model.owned_by ?? tx("providerReported")}</small>
+                  <strong>{model.display_name ?? model.id}</strong>
+                  <small>{model.owned_by ?? tx("providerReported")} · {bindingModel === model.id ? tx("loadingNativeModel") : model.loaded === false ? tx("modelOnDisk") : tx("selectProviderModel")}</small>
                 </span>
                 {settings.model === model.id && <span className="model-selected-mark">✓</span>}
               </button>
@@ -2642,6 +2723,10 @@ function App() {
             {autoDiscoveryBusy ? tx("discovering") : tx("discoverNow")}
           </button>
         </div>
+        <button className="primary-button browse-model-button" type="button"
+          disabled={modelLibraryBusy || autoDiscoveryBusy} onClick={() => void handleBrowseModelLibrary()}>
+          {tx("browseModelFolder")}
+        </button>
         {autoDiscoveryMessage && (
           <div className="connection-message discovery-message" role="status">
             {autoDiscoveryMessage}
@@ -2905,7 +2990,7 @@ function App() {
                     nativeRuntimeBusy ||
                     nativeRuntime.phase === "starting" ||
                     nativeRuntime.phase === "loading" ||
-                    nativeRuntime.phase === "ready"
+                    isStreaming
                   }
                 >
                   {tx("oneClickBind")}
@@ -3594,6 +3679,18 @@ function App() {
             <>
               {error && <div className="error-banner" role="alert">{error}</div>}
               <form className="composer-wrap" onSubmit={handleSubmit}>
+                <div className="composer-capabilities">
+                  <button type="button" aria-pressed={settings.web_tools_enabled} disabled={isStreaming}
+                    onClick={() => setSettings((current) => ({ ...current, web_tools_enabled: !current.web_tools_enabled }))}>
+                    {tx("webTools")}
+                  </button>
+                  <button type="button" aria-pressed={settings.worker_enabled} disabled={isStreaming}
+                    onClick={() => settings.worker_model.trim()
+                      ? setSettings((current) => ({ ...current, worker_enabled: !current.worker_enabled }))
+                      : setView("models")}>
+                    {tx("workerModel")}{settings.worker_enabled && settings.worker_model ? " · " + settings.worker_model : ""}
+                  </button>
+                </div>
                 <textarea
                   ref={composerRef}
                   aria-label={tx("messageComposer")}

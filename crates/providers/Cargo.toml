@@ -6,7 +6,10 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+chrono-tz = "0.10"
+html2md = "0.2"
 futures-util.workspace = true
+jsonschema.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -44,7 +44,10 @@ npm run build
 ### Local provider integration
 
 The current chat transport targets the OpenAI-compatible API surface:
-`GET /models` and `POST /chat/completions` under the configured base URL.
+`GET /models` and `POST /chat/completions` under the configured base URL. For
+loopback LM Studio and Ollama servers, the model library additionally probes
+their native catalogs (`/api/v1/models` and `/api/tags`) and can issue a
+provider-specific load/warm-up request before selecting the returned model.
 Streaming uses server-sent events and accepts both regular content deltas and
 the common `reasoning_content`/ `reasoning` delta names.
 
@@ -58,8 +61,9 @@ start.
 ### Agent tools and multi-LLM routing
 
 The desktop command `start_chat` builds a runtime tool registry from the request:
-the always-on read-only built-ins are calculator, UTC time, JSON formatting and
-text statistics; optional web tools provide HTTPS-only search/page distillation;
+the always-on read-only built-ins are calculator, UTC time, JSON formatting, text
+statistics, bounded text search, JSON Pointer lookup and unit conversion; optional
+web tools provide HTTPS-only search, multi-page research and page distillation;
 an optional worker endpoint adds bounded `delegate_task`. The registry is sent as
 OpenAI-compatible function schemas and a short system instruction is inserted by
 the native shell, so the frontend does not need to duplicate orchestration rules.
@@ -114,10 +118,12 @@ cargo test -p aegis-inference catalog
 cargo test -p aegis-database model_library_repository
 ```
 
-The Model library also offers **Discover now** and a one-click **Select and load**
-action. Discovery checks the supported common roots in the user's profile and is
-safe to repeat; a background refresh runs while the app is focused. Custom paths
-remain explicitly registered and scanned through the same bounded scanner.
+The Model library also offers **Discover now** and one-click provider model
+loading. Discovery checks the supported common roots in the user's profile and is
+safe to repeat; a filesystem watcher plus bounded refresh keeps the inventory
+current while the app is focused. Custom paths remain explicitly registered and
+scanned through the same bounded scanner, while native LM Studio/Ollama models do
+not require a local GGUF path.
 
 ### Native llama.cpp runtime
 

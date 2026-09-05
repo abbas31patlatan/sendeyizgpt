@@ -108,6 +108,9 @@ export type ChatRequest = z.infer<typeof ChatRequestSchema>;
 export const ProviderModelSchema = z.object({
   id: z.string().min(1),
   owned_by: z.string().nullable(),
+  load_via: z.enum(["lm_studio", "ollama"]).nullable().optional(),
+  loaded: z.boolean().nullable().optional(),
+  display_name: z.string().nullable().optional(),
 });
 
 export type ProviderModel = z.infer<typeof ProviderModelSchema>;

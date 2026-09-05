@@ -26,10 +26,11 @@ Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model cat
 - Bilingual native runtime controls with bundled pinned CPU runtime support and explicit external GPU-runtime path selection
 - Durable local prompt routines that run through the active provider, create inspectable result conversations and repeat only while the desktop app is open
 - Zero-config local GGUF discovery across common LM Studio, Ollama, Hugging Face, Downloads and Models roots, with bounded background refresh and searchable inventory
+- Native LM Studio and Ollama model catalogs with one-click load/warm-up, plus a live watcher for newly added local GGUF files
 - One-click native model binding: fresh metadata/preflight validation, real `llama-server` tensor load and automatic loopback provider routing
-- OpenAI-compatible function-calling loop with bounded calculator, clock, JSON, text analysis, public web search/page distillation and master-to-worker delegation
+- OpenAI-compatible function-calling loop with bounded calculator, clock, JSON, text analysis, text search, JSON Pointer queries, unit conversion, public web research/page distillation and master-to-worker delegation
 - Parallel tool execution, visible tool activity, cancellation, schema-unsupported fallback and per-tool self-correction capped at three attempts
-- Per-provider system prompt, conversation rename/Markdown export and strict bilingual UX
+- Per-provider system prompt, conversation rename/Markdown export, safe GFM response rendering and strict bilingual UX
 - Architecture, security, plugin and development documentation
 
 Native llama.cpp tensor loading and generation are now wired through a supervised
@@ -100,9 +101,11 @@ current session and is never persisted by the frontend or SQLite.
 
 Open **Model library** and choose **Discover now**. Aegis checks common local
 model roots in the background, parses only bounded GGUF metadata and shows a
-searchable inventory. **Select and load** performs a fresh preflight and binds the
-real native runtime to the chat provider automatically. No tensor data is copied
-by the catalog scanner.
+searchable inventory. LM Studio and Ollama are also queried through their native
+local management APIs, so an Ollama model does not need to be located as a
+separate `.gguf` file. Select a provider model to load/warm it, or select a GGUF
+card to perform a fresh preflight and bind the real native runtime to the chat
+provider automatically. No tensor data is copied by the catalog scanner.
 
 The **Agent capabilities** panel enables two optional capabilities:
 
@@ -117,8 +120,10 @@ The **Agent capabilities** panel enables two optional capabilities:
 Every request receives the active function schemas at runtime. Tool arguments are
 validated, malformed calls receive a bounded correction prompt (maximum three
 attempts per tool), and unsupported provider tool schemas fall back to ordinary
-streaming chat. Tools never expose a shell, arbitrary file access or a generic
-HTTP client.
+streaming chat. The UI shows each tool phase and source count, and Markdown/GFM
+answers are rendered with HTML disabled and external links opened through the
+native shell. Tools never expose a shell, arbitrary file access or a generic HTTP
+client.
 
 ### Native llama.cpp local chat
 
@@ -159,7 +164,9 @@ The interface follows the operating-system language on first launch and can be
 switched between Turkish and English from the top bar. System, dark and light
 themes are persisted as non-secret preferences. Recent conversations can be
 searched with `Ctrl+K`, created with `Ctrl+N`, copied message-by-message and
-deleted with confirmation.
+deleted with confirmation. Assistant answers support headings, lists, tables and
+fenced code blocks; untrusted HTML and tracking images are ignored, while safe
+HTTPS source links open outside the WebView.
 
 Streaming token and reasoning events are coalesced into animation-frame updates
 before React state is changed. Conversation persistence is paused while a response
@@ -192,9 +199,12 @@ Permission-Broker-mediated tool worker.
 
 The **Model library** view has two real workflows. Provider diagnostics make an
 actual request, report route class (local/remote), round-trip latency, retryability
-and the provider's live `/models` catalog. Local model registration canonicalizes a
-user-selected directory, reads only bounded GGUF headers/metadata, retains valid
-models when another file is corrupt, and stores the indexed snapshot in SQLite.
+and the provider's live catalog. LM Studio (`/api/v1/models`) and Ollama
+(`/api/tags`) model records are selectable and can be loaded from the same screen;
+local model registration canonicalizes a user-selected directory, reads only
+bounded GGUF headers/metadata, retains valid models when another file is corrupt,
+and stores the indexed snapshot in SQLite. A live watcher and bounded refresh keep
+the inventory current without repeatedly reading tensor data.
 Profiles are saved separately and their weight/KV-cache/RAM/VRAM figures are
 explicitly advisory before load. Once the native runtime reports **Ready**, that is
 evidence that the process accepted the GGUF; detailed device telemetry remains

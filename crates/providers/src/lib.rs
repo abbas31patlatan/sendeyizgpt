@@ -4,7 +4,11 @@
 //! cancellation. The desktop shell only receives typed chat events and never
 //! needs to handle provider-specific wire formats.
 
+mod managed;
 pub mod tools;
+mod utilities;
+
+pub use managed::ManagedProvider;
 
 pub use tools::{
     BuiltinToolError, ToolExecution, builtin_tool_definitions, execute_builtin_tool,
@@ -254,6 +258,12 @@ pub enum ChatChunk {
 pub struct ProviderModel {
     pub id: String,
     pub owned_by: Option<String>,
+    #[serde(default)]
+    pub load_via: Option<ManagedProvider>,
+    #[serde(default)]
+    pub loaded: Option<bool>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -287,6 +297,7 @@ impl OpenAiCompatibleClient {
             .user_agent("Aegis-AI/0.2")
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| ProviderError::Client(error.to_string()))?;
         Ok(Self {
@@ -297,15 +308,19 @@ impl OpenAiCompatibleClient {
     }
 
     pub async fn list_models(&self) -> Result<Vec<ProviderModel>, ProviderError> {
+        if let Some(models) = self.list_managed_models().await? {
+            return Ok(models);
+        }
         let response = self
             .authorized(self.http.get(self.endpoint("models")))
             .send()
             .await
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
         let response = checked_response(response).await?;
-        let payload: ModelsResponse = response
-            .json()
-            .await
+        let bytes =
+            bounded_response_bytes(response, &CancellationToken::new(), MAX_JSON_RESPONSE_BYTES)
+                .await?;
+        let payload: ModelsResponse = serde_json::from_slice(&bytes)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
         Ok(payload
             .data
@@ -314,6 +329,9 @@ impl OpenAiCompatibleClient {
             .map(|model| ProviderModel {
                 id: model.id,
                 owned_by: model.owned_by,
+                load_via: None,
+                loaded: None,
+                display_name: None,
             })
             .collect())
     }
@@ -343,6 +361,7 @@ impl OpenAiCompatibleClient {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stream: true,
+            parallel_tool_calls: (!request.tools.is_empty()).then_some(true),
             tools: request.tools,
         };
         let response = tokio::select! {
@@ -354,6 +373,7 @@ impl OpenAiCompatibleClient {
         let response = checked_response(response).await?;
         let mut stream = response.bytes_stream();
         let mut parser = SseParser::default();
+        let mut decoder = Utf8StreamDecoder::default();
         let mut generated_tokens = 0_u64;
         let mut prompt_tokens = None;
         let mut time_to_first_token_ms = None;
@@ -365,9 +385,8 @@ impl OpenAiCompatibleClient {
             next = stream.next() => next,
         } {
             let bytes = next.map_err(|error| ProviderError::Transport(error.to_string()))?;
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
-            for event in parser.push(text)? {
+            let text = decoder.push(&bytes)?;
+            for event in parser.push(&text)? {
                 if process_event(
                     event,
                     &mut generated_tokens,
@@ -387,6 +406,7 @@ impl OpenAiCompatibleClient {
         }
 
         if !stream_finished {
+            decoder.finish()?;
             for event in parser.finish()? {
                 if process_event(
                     event,
@@ -425,6 +445,7 @@ impl OpenAiCompatibleClient {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stream: false,
+            parallel_tool_calls: (!request.tools.is_empty()).then_some(true),
             tools: request.tools,
         };
         let response = tokio::select! {
@@ -492,7 +513,8 @@ async fn checked_response(response: Response) -> Result<Response, ProviderError>
         return Ok(response);
     }
     let status = response.status().as_u16();
-    let body = response.text().await.unwrap_or_default();
+    let bytes = bounded_response_bytes(response, &CancellationToken::new(), 64 * 1024).await?;
+    let body = String::from_utf8_lossy(&bytes);
     Err(ProviderError::HttpStatus {
         status,
         body: sanitize_error(&body),
@@ -535,6 +557,38 @@ fn sanitize_error(value: &str) -> String {
         return "provider returned no additional details".to_owned();
     }
     compact.chars().take(512).collect()
+}
+
+/// HTTP frames may split a Turkish character or emoji at any byte boundary.
+#[derive(Default)]
+struct Utf8StreamDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8StreamDecoder {
+    fn push(&mut self, bytes: &[u8]) -> Result<String, ProviderError> {
+        self.pending.extend_from_slice(bytes);
+        let valid = match std::str::from_utf8(&self.pending) {
+            Ok(_) => self.pending.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(error) => return Err(ProviderError::InvalidResponse(error.to_string())),
+        };
+        let text = std::str::from_utf8(&self.pending[..valid])
+            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?
+            .to_owned();
+        self.pending.drain(..valid);
+        Ok(text)
+    }
+
+    fn finish(&self) -> Result<(), ProviderError> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(ProviderError::InvalidResponse(
+                "stream ended inside a UTF-8 character".into(),
+            ))
+        }
+    }
 }
 
 fn process_event<F>(
@@ -687,6 +741,8 @@ struct ApiChatRequest {
     max_tokens: u32,
     temperature: f32,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ToolDefinition>,
 }
@@ -800,6 +856,22 @@ impl ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf8_stream_accepts_every_possible_frame_boundary() {
+        let source = "data: {\"content\":\"Türkçe 🌍 你好\"}\n\n";
+        for split in 0..=source.len() {
+            let mut decoder = Utf8StreamDecoder::default();
+            let mut text = decoder.push(&source.as_bytes()[..split]).unwrap();
+            text.push_str(&decoder.push(&source.as_bytes()[split..]).unwrap());
+            decoder.finish().unwrap();
+            assert_eq!(text, source);
+        }
+        let mut decoder = Utf8StreamDecoder::default();
+        decoder.push(&[0xf0, 0x9f]).unwrap();
+        assert!(decoder.finish().is_err());
+        assert!(Utf8StreamDecoder::default().push(&[0xff]).is_err());
+    }
 
     fn config() -> ProviderConfig {
         ProviderConfig {
@@ -928,6 +1000,7 @@ mod tests {
             temperature: 0.2,
             stream: true,
             tools: vec![tool],
+            parallel_tool_calls: Some(true),
         };
         let value = serde_json::to_value(body).expect("tool request serializes");
         assert_eq!(value["tools"][0]["type"], "function");

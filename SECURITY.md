@@ -17,7 +17,8 @@ Security is a runtime invariant, not a prompt-writing convention.
 8. Provider API keys are session-only in the current chat slice and are never
    written to SQLite, localStorage or the workspace registry.
 9. Public web retrieval is HTTPS-only, rejects loopback/private/link-local hosts,
-   follows no redirects and returns bounded untrusted source material.
+   resolves and pins approved public DNS answers, follows only revalidated
+   redirects and returns bounded untrusted source material.
 10. Tool schemas and arguments are bounded at the native boundary. Tool failures
     are returned as data for correction, never as executable instructions.
 
@@ -60,10 +61,11 @@ The current agent loop exposes only read-only built-ins and a controlled public-
 retrieval path:
 
 - Calculator, UTC clock, JSON formatting and text statistics do not touch the host.
-- Web search uses a fixed HTTPS search endpoint. Page retrieval accepts only HTTPS
-  public hosts, resolves and checks DNS answers for private/local ranges, disables
-  redirects, limits response bytes and strips active HTML blocks before the text
-  enters the model context.
+- Web search uses a fixed HTTPS search endpoint whose DNS answers are checked and
+  pinned for the request. Page retrieval accepts only HTTPS public hosts, resolves
+  and checks DNS answers for private/local ranges, disables automatic redirects,
+  revalidates each redirect target, limits response bytes and strips active HTML
+  blocks before the text enters the model context.
 - Master-to-worker delegation accepts only a bounded task/context payload. The
   worker receives a separate request with tools disabled; timeout, transport and
   provider failures are handled by a master fallback.
@@ -99,7 +101,7 @@ Do not include real API keys, personal files or private model assets in an issue
 The first report should include the smallest reproducible input, affected
 worker/core boundary, platform and whether a permit was required.
 
-## Deliberate limitations after M3a
+## Deliberate limitations after M3b
 
 The current product does not expose host filesystem, shell, browser, microphone,
 camera, screen or keyboard/mouse executors. Native GGUF tensor loading and the

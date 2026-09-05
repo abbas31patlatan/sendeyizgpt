@@ -13,6 +13,7 @@ use aegis_providers::{
     ToolCallFunction, ToolExecution, builtin_tool_definitions, execute_builtin_tool,
     tool_system_instructions,
 };
+use aegis_providers::{ManagedProvider, tools::validate_tool_request};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -20,11 +21,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
+mod model_watch;
 
 pub struct DesktopState {
     pub core: Arc<ApplicationCore>,
     pub database: Arc<Database>,
     pub native_runtime: Arc<LlamaServerRuntime>,
+    pub model_watcher: std::sync::Mutex<model_watch::ModelWatcher>,
 }
 
 #[derive(Debug, Serialize)]
@@ -349,6 +352,7 @@ fn default_model_roots() -> Vec<(String, PathBuf)> {
     let mut candidates = Vec::new();
     if let Some(home) = home {
         candidates.extend([
+            ("LM Studio".to_owned(), home.join(".lmstudio/models")),
             (
                 "LM Studio · cache".to_owned(),
                 home.join(".cache/lm-studio/models"),
@@ -395,15 +399,31 @@ fn automatic_library_id(path: &Path) -> String {
 
 #[tauri::command]
 async fn discover_local_models(
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<ModelDiscoverySummary, String> {
+    static SCAN_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _scan = SCAN_GATE
+        .try_lock()
+        .map_err(|_| "model discovery is already running".to_owned())?;
     let database = Arc::clone(&state.database);
     let started = Instant::now();
     let mut scanned_roots = 0;
     let mut visited_files = 0;
     let mut issues = Vec::new();
 
-    for (name, candidate) in default_model_roots() {
+    let existing = database
+        .list_model_libraries()
+        .map_err(|error| error.to_string())?;
+    let mut roots = default_model_roots();
+    roots.extend(
+        existing
+            .iter()
+            .map(|library| (library.name.clone(), PathBuf::from(&library.root_path))),
+    );
+    let mut seen = std::collections::BTreeSet::new();
+    let mut watched_roots = std::collections::BTreeSet::new();
+    for (name, candidate) in roots.into_iter().take(64) {
         if !candidate.is_dir() {
             continue;
         }
@@ -417,15 +437,28 @@ async fn discover_local_models(
                 continue;
             }
         };
-        let id = automatic_library_id(&canonical_path);
+        if !seen.insert(canonical_path.clone()) {
+            continue;
+        }
+        let registered = existing
+            .iter()
+            .find(|library| Path::new(&library.root_path) == canonical_path);
+        if registered.is_some_and(|library| !library.enabled) {
+            continue;
+        }
+        watched_roots.insert(canonical_path.clone());
+        let id = registered.map_or_else(
+            || automatic_library_id(&canonical_path),
+            |library| library.id.clone(),
+        );
         let now = unix_now_millis();
         let library = ModelLibraryRecord {
             id,
-            name,
+            name: registered.map_or(name, |library| library.name.clone()),
             root_path: canonical_path.to_string_lossy().into_owned(),
             enabled: true,
             last_scan_at: None,
-            created_at: now,
+            created_at: registered.map_or(now, |library| library.created_at),
             updated_at: now,
         };
         database
@@ -463,6 +496,19 @@ async fn discover_local_models(
             .map_err(|error| error.to_string())?;
     }
 
+    let watch_result = state
+        .model_watcher
+        .lock()
+        .map_err(|_| "model watcher lock failed".to_owned())
+        .and_then(|mut watcher| watcher.sync(&app, watched_roots));
+    if let Err(error) = watch_result {
+        issues.push(ModelScanIssueView {
+            path: String::new(),
+            message: format!(
+                "live watching unavailable; periodic discovery remains active: {error}"
+            ),
+        });
+    }
     Ok(ModelDiscoverySummary {
         libraries: database
             .list_model_libraries()
@@ -771,10 +817,8 @@ fn prepare_agent_request(mut request: ChatRequest) -> ChatRequest {
         .iter_mut()
         .find(|message| message.role == ChatRole::System)
     {
-        if !system_message.content.contains("Aegis araçları etkin") {
-            system_message.content.push_str("\n\n");
-            system_message.content.push_str(&instructions);
-        }
+        system_message.content.push_str("\n\n");
+        system_message.content.push_str(&instructions);
     } else {
         request.messages.insert(
             0,
@@ -790,11 +834,23 @@ fn prepare_agent_request(mut request: ChatRequest) -> ChatRequest {
     request
 }
 
-fn collect_tool_call(calls: &mut Vec<PendingAgentToolCall>, delta: ToolCallDelta) {
+fn collect_tool_call(
+    calls: &mut Vec<PendingAgentToolCall>,
+    delta: ToolCallDelta,
+) -> Result<(), String> {
+    if delta.index >= 8 {
+        return Err("a model may request at most eight tools per round".into());
+    }
     if calls.len() <= delta.index {
         calls.resize_with(delta.index + 1, PendingAgentToolCall::default);
     }
     let call = &mut calls[delta.index];
+    if delta.id.as_ref().is_some_and(|id| id.len() > 256)
+        || call.name.len() + delta.name.as_ref().map_or(0, String::len) > 128
+        || call.arguments.len() + delta.arguments.as_ref().map_or(0, String::len) > 64 * 1024
+    {
+        return Err("streamed tool call exceeded its size limit".into());
+    }
     if let Some(id) = delta.id.filter(|value| !value.trim().is_empty()) {
         call.id = id;
     }
@@ -804,6 +860,7 @@ fn collect_tool_call(calls: &mut Vec<PendingAgentToolCall>, delta: ToolCallDelta
     if let Some(arguments) = delta.arguments {
         call.arguments.push_str(&arguments);
     }
+    Ok(())
 }
 
 fn assistant_tool_call(call: &PendingAgentToolCall, index: usize) -> AssistantToolCall {
@@ -823,7 +880,7 @@ fn assistant_tool_call(call: &PendingAgentToolCall, index: usize) -> AssistantTo
 
 async fn run_delegate_tool(
     master: OpenAiCompatibleClient,
-    worker: Option<ProviderConfig>,
+    worker: Option<OpenAiCompatibleClient>,
     arguments: &Value,
     max_tokens: u32,
     cancellation: tokio_util::sync::CancellationToken,
@@ -844,9 +901,8 @@ async fn run_delegate_tool(
         .chars()
         .take(24_000)
         .collect::<String>();
-    let worker_config = worker.ok_or_else(|| "no worker model is configured".to_owned())?;
-    let worker_client = OpenAiCompatibleClient::new(worker_config.clone())
-        .map_err(|error| format!("worker is unavailable: {error}"))?;
+    let worker_client = worker.ok_or_else(|| "no worker model is configured".to_owned())?;
+    let worker_config = worker_client.config_clone();
     let worker_prompt = if context.is_empty() {
         task.to_owned()
     } else {
@@ -951,7 +1007,7 @@ async fn run_delegate_tool(
 
 async fn run_agent_tool(
     master: OpenAiCompatibleClient,
-    worker: Option<ProviderConfig>,
+    worker: Option<OpenAiCompatibleClient>,
     call: PendingAgentToolCall,
     max_tokens: u32,
     cancellation: tokio_util::sync::CancellationToken,
@@ -967,13 +1023,19 @@ async fn run_agent_tool(
 }
 
 fn is_tool_schema_unsupported(error: &ProviderError) -> bool {
-    matches!(
-        error,
+    match error {
         ProviderError::HttpStatus {
-            status: 400 | 404 | 422,
-            ..
+            status: 400 | 422,
+            body,
+        } => {
+            let message = body.to_ascii_lowercase();
+            (message.contains("tool") || message.contains("function"))
+                && (message.contains("unsupported")
+                    || message.contains("not support")
+                    || message.contains("not allowed"))
         }
-    )
+        _ => false,
+    }
 }
 
 async fn stream_chat_with_tools(
@@ -983,7 +1045,13 @@ async fn stream_chat_with_tools(
     operation_id: String,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<ChatCompletionSummary, ProviderError> {
+    let plain_request = request.clone();
     let prepared = prepare_agent_request(request);
+    let worker_client = prepared
+        .worker
+        .clone()
+        .map(OpenAiCompatibleClient::new)
+        .transpose()?;
     let definitions = builtin_tool_definitions(prepared.web_tools, prepared.worker.is_some());
     if definitions.is_empty() {
         let operation_for_events = operation_id.clone();
@@ -1010,7 +1078,7 @@ async fn stream_chat_with_tools(
     }
 
     let plain_fallback = {
-        let mut fallback = prepared.clone();
+        let mut fallback = plain_request;
         fallback.tools.clear();
         fallback.web_tools = false;
         fallback.worker = None;
@@ -1024,30 +1092,63 @@ async fn stream_chat_with_tools(
             return Err(ProviderError::Cancelled);
         }
         let mut pending = Vec::new();
+        let mut pending_error = None;
+        let mut round_content = String::new();
+        let round_cancellation = cancellation.child_token();
         let operation_for_events = operation_id.clone();
         let app_for_chunks = app.clone();
         let result = client
-            .stream_chat(working.clone(), cancellation.clone(), |chunk| match chunk {
-                ChatChunk::Content { text } => emit_chat(
-                    &app_for_chunks,
-                    ChatEvent::Token {
-                        operation_id: operation_for_events.clone(),
-                        text,
-                    },
-                ),
-                ChatChunk::Reasoning { text } => emit_chat(
-                    &app_for_chunks,
-                    ChatEvent::Reasoning {
-                        operation_id: operation_for_events.clone(),
-                        text,
-                    },
-                ),
-                ChatChunk::ToolCallDelta(delta) => collect_tool_call(&mut pending, delta),
-            })
+            .stream_chat(
+                working.clone(),
+                round_cancellation.clone(),
+                |chunk| match chunk {
+                    ChatChunk::Content { text } => {
+                        if round_content.len() + text.len() > 256 * 1024 {
+                            pending_error =
+                                Some("assistant tool context exceeded its size limit".into());
+                            round_cancellation.cancel();
+                            return;
+                        }
+                        round_content.push_str(&text);
+                        emit_chat(
+                            &app_for_chunks,
+                            ChatEvent::Token {
+                                operation_id: operation_for_events.clone(),
+                                text,
+                            },
+                        )
+                    }
+                    ChatChunk::Reasoning { text } => emit_chat(
+                        &app_for_chunks,
+                        ChatEvent::Reasoning {
+                            operation_id: operation_for_events.clone(),
+                            text,
+                        },
+                    ),
+                    ChatChunk::ToolCallDelta(delta) => {
+                        if let Err(error) = collect_tool_call(&mut pending, delta) {
+                            pending_error = Some(error);
+                            round_cancellation.cancel();
+                        }
+                    }
+                },
+            )
             .await;
+        if let Some(error) = pending_error {
+            return Err(ProviderError::InvalidResponse(error));
+        }
         let summary = match result {
             Ok(summary) => summary,
             Err(error) if round == 0 && is_tool_schema_unsupported(&error) => {
+                emit_chat(
+                    &app,
+                    ChatEvent::Tool {
+                        operation_id: operation_id.clone(),
+                        tool_id: "tools".into(),
+                        phase: "error".into(),
+                        detail: "unsupported".into(),
+                    },
+                );
                 let operation_for_events = operation_id.clone();
                 let app_for_chunks = app.clone();
                 return client
@@ -1079,7 +1180,7 @@ async fn stream_chat_with_tools(
 
         for (index, call) in pending.iter_mut().enumerate() {
             if call.id.trim().is_empty() {
-                call.id = format!("aegis-tool-call-{index}");
+                call.id = format!("aegis-tool-call-{round}-{index}");
             }
         }
 
@@ -1090,7 +1191,7 @@ async fn stream_chat_with_tools(
             .collect::<Vec<_>>();
         working.messages.push(ChatMessage {
             role: ChatRole::Assistant,
-            content: String::new(),
+            content: round_content,
             name: None,
             tool_call_id: None,
             tool_calls: Some(assistant_calls),
@@ -1103,20 +1204,39 @@ async fn stream_chat_with_tools(
                     operation_id: operation_id.clone(),
                     tool_id: call.name.clone(),
                     phase: "running".to_owned(),
-                    detail: "Aegis aracı çalışıyor".to_owned(),
+                    detail: "running".to_owned(),
                 },
             );
         }
 
         let max_tokens = working.max_tokens;
-        let worker_config = working.worker.clone();
+        let worker_config = worker_client.clone();
         let futures = pending.iter().cloned().map(|call| {
             let master = client.clone();
             let worker = worker_config.clone();
             let cancellation = cancellation.clone();
+            let definitions = &definitions;
             async move {
-                let result =
-                    run_agent_tool(master, worker, call.clone(), max_tokens, cancellation).await;
+                let validated = serde_json::from_str::<Value>(&call.arguments)
+                    .map_err(|error| format!("invalid tool JSON: {error}"))
+                    .and_then(|arguments| {
+                        validate_tool_request(definitions, &call.name, &arguments)
+                            .map_err(|error| error.to_string())
+                    });
+                let result = match validated {
+                    Ok(()) => {
+                        run_agent_tool(master, worker, call.clone(), max_tokens, cancellation)
+                            .await
+                            .and_then(|execution| {
+                                if execution.output.len() <= 64 * 1024 {
+                                    Ok(execution)
+                                } else {
+                                    Err("tool output exceeded 64 KiB; use a smaller input".into())
+                                }
+                            })
+                    }
+                    Err(error) => Err(error),
+                };
                 (call, result)
             }
         });
@@ -1130,9 +1250,9 @@ async fn stream_chat_with_tools(
                 Ok(execution) => {
                     tool_error_counts.remove(&call.name);
                     let source_detail = if execution.source_urls.is_empty() {
-                        "tamamlandı".to_owned()
+                        "completed".to_owned()
                     } else {
-                        format!("tamamlandı · {} kaynak", execution.source_urls.len())
+                        format!("completed_sources:{}", execution.source_urls.len())
                     };
                     (execution.output, "completed".to_owned(), source_detail)
                 }
@@ -1154,7 +1274,7 @@ async fn stream_chat_with_tools(
                         })
                         .to_string(),
                         "error".to_owned(),
-                        format!("düzeltme bekleniyor · deneme {}", *count),
+                        format!("retry:{}", *count),
                     )
                 }
             };
@@ -1277,6 +1397,18 @@ async fn list_provider_models(config: ProviderConfig) -> Result<Vec<ProviderMode
 }
 
 #[tauri::command]
+async fn load_provider_model(
+    config: ProviderConfig,
+    kind: ManagedProvider,
+) -> Result<String, String> {
+    OpenAiCompatibleClient::new(config)
+        .map_err(|error| error.to_string())?
+        .load_managed_model(kind)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn inspect_provider(config: ProviderConfig) -> Result<ProviderDiagnostics, String> {
     let endpoint_url = config.validate().map_err(|error| error.to_string())?;
     let endpoint = endpoint_url.as_str().trim_end_matches('/').to_owned();
@@ -1350,6 +1482,8 @@ pub fn run() {
     };
 
     if let Err(error) = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(move |app| -> Result<(), Box<dyn std::error::Error>> {
             let database = initialize_database(app.handle())?;
             let native_runtime = Arc::new(
@@ -1360,6 +1494,7 @@ pub fn run() {
                 core: Arc::clone(&core),
                 database: Arc::new(database),
                 native_runtime,
+                model_watcher: std::sync::Mutex::new(model_watch::ModelWatcher::default()),
             });
             Ok(())
         })
@@ -1390,6 +1525,7 @@ pub fn run() {
             stop_native_model,
             start_chat,
             list_provider_models,
+            load_provider_model,
             inspect_provider,
             cancel_operation,
             stop_everything

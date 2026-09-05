@@ -96,6 +96,14 @@ export async function inspectProvider(config: ProviderConfig): Promise<ProviderD
   return ProviderDiagnosticsSchema.parse(raw);
 }
 
+export async function loadProviderModel(config: ProviderConfig, kind: "lm_studio" | "ollama"): Promise<string> {
+  return invoke<string>("load_provider_model", { config, kind });
+}
+
+export function listenModelChanges(handler: () => void): Promise<UnlistenFn> {
+  return listen("aegis://models-changed", handler);
+}
+
 export async function loadPersistedConversations(): Promise<PersistedConversation[]> {
   const raw = await invoke<unknown>("load_conversations");
   return PersistedConversationSchema.array().parse(raw);
