@@ -1027,27 +1027,23 @@ async fn stream_chat_with_tools(
         let operation_for_events = operation_id.clone();
         let app_for_chunks = app.clone();
         let result = client
-            .stream_chat(
-                working.clone(),
-                cancellation.clone(),
-                |chunk| match chunk {
-                    ChatChunk::Content { text } => emit_chat(
-                        &app_for_chunks,
-                        ChatEvent::Token {
-                            operation_id: operation_for_events.clone(),
-                            text,
-                        },
-                    ),
-                    ChatChunk::Reasoning { text } => emit_chat(
-                        &app_for_chunks,
-                        ChatEvent::Reasoning {
-                            operation_id: operation_for_events.clone(),
-                            text,
-                        },
-                    ),
-                    ChatChunk::ToolCallDelta(delta) => collect_tool_call(&mut pending, delta),
-                },
-            )
+            .stream_chat(working.clone(), cancellation.clone(), |chunk| match chunk {
+                ChatChunk::Content { text } => emit_chat(
+                    &app_for_chunks,
+                    ChatEvent::Token {
+                        operation_id: operation_for_events.clone(),
+                        text,
+                    },
+                ),
+                ChatChunk::Reasoning { text } => emit_chat(
+                    &app_for_chunks,
+                    ChatEvent::Reasoning {
+                        operation_id: operation_for_events.clone(),
+                        text,
+                    },
+                ),
+                ChatChunk::ToolCallDelta(delta) => collect_tool_call(&mut pending, delta),
+            })
             .await;
         let summary = match result {
             Ok(summary) => summary,
