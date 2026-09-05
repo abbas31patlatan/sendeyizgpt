@@ -434,19 +434,13 @@ impl OpenAiCompatibleClient {
             }
         };
         let response = checked_response(response).await?;
-        let bytes = bounded_response_bytes(
-            response,
-            &cancellation,
-            MAX_JSON_RESPONSE_BYTES,
-        )
-        .await?;
+        let bytes =
+            bounded_response_bytes(response, &cancellation, MAX_JSON_RESPONSE_BYTES).await?;
         let payload: ApiChatResponse = serde_json::from_slice(&bytes)
             .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
-        let choice = payload
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| ProviderError::InvalidResponse("provider returned no choices".to_owned()))?;
+        let choice = payload.choices.into_iter().next().ok_or_else(|| {
+            ProviderError::InvalidResponse("provider returned no choices".to_owned())
+        })?;
         let message = choice.message;
         Ok(ChatCompletion {
             message: ChatMessage {
@@ -579,7 +573,10 @@ where
         on_chunk(ChatChunk::ToolCallDelta(ToolCallDelta {
             index: tool_call.index.unwrap_or_default(),
             id: tool_call.id.clone(),
-            name: tool_call.function.as_ref().and_then(|function| function.name.clone()),
+            name: tool_call
+                .function
+                .as_ref()
+                .and_then(|function| function.name.clone()),
             arguments: tool_call
                 .function
                 .as_ref()

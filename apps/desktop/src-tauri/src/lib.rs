@@ -10,8 +10,8 @@ use aegis_inference::{
 use aegis_providers::{
     AssistantToolCall, ChatChunk, ChatCompletionSummary, ChatMessage, ChatRequest, ChatRole,
     OpenAiCompatibleClient, ProviderConfig, ProviderError, ProviderModel, ToolCallDelta,
-    ToolCallFunction,
-    ToolExecution, builtin_tool_definitions, execute_builtin_tool, tool_system_instructions,
+    ToolCallFunction, ToolExecution, builtin_tool_definitions, execute_builtin_tool,
+    tool_system_instructions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -349,18 +349,33 @@ fn default_model_roots() -> Vec<(String, PathBuf)> {
     let mut candidates = Vec::new();
     if let Some(home) = home {
         candidates.extend([
-            ("LM Studio · cache".to_owned(), home.join(".cache/lm-studio/models")),
-            ("Hugging Face · cache".to_owned(), home.join(".cache/huggingface/hub")),
+            (
+                "LM Studio · cache".to_owned(),
+                home.join(".cache/lm-studio/models"),
+            ),
+            (
+                "Hugging Face · cache".to_owned(),
+                home.join(".cache/huggingface/hub"),
+            ),
             ("Ollama · models".to_owned(), home.join(".ollama/models")),
             ("Modeller".to_owned(), home.join("Models")),
             ("İndirilenler".to_owned(), home.join("Downloads")),
-            ("Belgeler · modeller".to_owned(), home.join("Documents/Models")),
+            (
+                "Belgeler · modeller".to_owned(),
+                home.join("Documents/Models"),
+            ),
         ]);
     }
     if let Some(local_app_data) = local_app_data {
         candidates.extend([
-            ("LM Studio · local".to_owned(), local_app_data.join("LM Studio/models")),
-            ("LM Studio · app".to_owned(), local_app_data.join("lm-studio/models")),
+            (
+                "LM Studio · local".to_owned(),
+                local_app_data.join("LM Studio/models"),
+            ),
+            (
+                "LM Studio · app".to_owned(),
+                local_app_data.join("lm-studio/models"),
+            ),
         ]);
     }
 
@@ -372,7 +387,9 @@ fn default_model_roots() -> Vec<(String, PathBuf)> {
 }
 
 fn automatic_library_id(path: &Path) -> String {
-    let digest = blake3::hash(path.to_string_lossy().as_bytes()).to_hex().to_string();
+    let digest = blake3::hash(path.to_string_lossy().as_bytes())
+        .to_hex()
+        .to_string();
     format!("model-library-auto-{}", &digest[..24])
 }
 
@@ -415,9 +432,10 @@ async fn discover_local_models(
             .save_model_library(&library)
             .map_err(|error| error.to_string())?;
         let root_for_scan = canonical_path.clone();
-        let report = tauri::async_runtime::spawn_blocking(move || scan_model_directory(root_for_scan))
-            .await
-            .map_err(|error| format!("model discovery worker failed: {error}"))?;
+        let report =
+            tauri::async_runtime::spawn_blocking(move || scan_model_directory(root_for_scan))
+                .await
+                .map_err(|error| format!("model discovery worker failed: {error}"))?;
         let report = match report {
             Ok(report) => report,
             Err(error) => {
@@ -1009,23 +1027,27 @@ async fn stream_chat_with_tools(
         let operation_for_events = operation_id.clone();
         let app_for_chunks = app.clone();
         let result = client
-            .stream_chat(working.clone(), cancellation.clone(), move |chunk| match chunk {
-                ChatChunk::Content { text } => emit_chat(
-                    &app_for_chunks,
-                    ChatEvent::Token {
-                        operation_id: operation_for_events.clone(),
-                        text,
-                    },
-                ),
-                ChatChunk::Reasoning { text } => emit_chat(
-                    &app_for_chunks,
-                    ChatEvent::Reasoning {
-                        operation_id: operation_for_events.clone(),
-                        text,
-                    },
-                ),
-                ChatChunk::ToolCallDelta(delta) => collect_tool_call(&mut pending, delta),
-            })
+            .stream_chat(
+                working.clone(),
+                cancellation.clone(),
+                move |chunk| match chunk {
+                    ChatChunk::Content { text } => emit_chat(
+                        &app_for_chunks,
+                        ChatEvent::Token {
+                            operation_id: operation_for_events.clone(),
+                            text,
+                        },
+                    ),
+                    ChatChunk::Reasoning { text } => emit_chat(
+                        &app_for_chunks,
+                        ChatEvent::Reasoning {
+                            operation_id: operation_for_events.clone(),
+                            text,
+                        },
+                    ),
+                    ChatChunk::ToolCallDelta(delta) => collect_tool_call(&mut pending, delta),
+                },
+            )
             .await;
         let summary = match result {
             Ok(summary) => summary,
@@ -1097,14 +1119,8 @@ async fn stream_chat_with_tools(
             let worker = worker_config.clone();
             let cancellation = cancellation.clone();
             async move {
-                let result = run_agent_tool(
-                    master,
-                    worker,
-                    call.clone(),
-                    max_tokens,
-                    cancellation,
-                )
-                .await;
+                let result =
+                    run_agent_tool(master, worker, call.clone(), max_tokens, cancellation).await;
                 (call, result)
             }
         });

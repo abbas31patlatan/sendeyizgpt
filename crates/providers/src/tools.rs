@@ -40,10 +40,7 @@ pub enum BuiltinToolError {
     Cancelled,
 }
 
-pub fn builtin_tool_definitions(
-    include_web: bool,
-    include_delegate: bool,
-) -> Vec<ToolDefinition> {
+pub fn builtin_tool_definitions(include_web: bool, include_delegate: bool) -> Vec<ToolDefinition> {
     let mut definitions = vec![
         ToolDefinition::function(
             "calculator",
@@ -208,7 +205,11 @@ fn execute_json_format(arguments: &Value) -> Result<ToolExecution, BuiltinToolEr
 fn execute_text_stats(arguments: &Value) -> Result<ToolExecution, BuiltinToolError> {
     let text = required_string(arguments, "text", 1024 * 1024)?;
     let words = text.split_whitespace().count();
-    let lines = if text.is_empty() { 0 } else { text.lines().count() };
+    let lines = if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    };
     Ok(ToolExecution {
         tool_id: "text_stats".to_owned(),
         output: json!({
@@ -244,11 +245,16 @@ async fn execute_web_search(
     if results.is_empty() {
         return Ok(ToolExecution {
             tool_id: "web_search".to_owned(),
-            output: json!({"query": query, "results": [], "message": "No public results were parsed."}).to_string(),
+            output:
+                json!({"query": query, "results": [], "message": "No public results were parsed."})
+                    .to_string(),
             source_urls: Vec::new(),
         });
     }
-    let source_urls = results.iter().map(|item| item.url.clone()).collect::<Vec<_>>();
+    let source_urls = results
+        .iter()
+        .map(|item| item.url.clone())
+        .collect::<Vec<_>>();
     Ok(ToolExecution {
         tool_id: "web_search".to_owned(),
         output: json!({
@@ -420,8 +426,9 @@ async fn bounded_text(
         }
         bytes.extend_from_slice(&chunk);
     }
-    String::from_utf8(bytes)
-        .map_err(|error| BuiltinToolError::InvalidResponse(format!("response is not UTF-8: {error}")))
+    String::from_utf8(bytes).map_err(|error| {
+        BuiltinToolError::InvalidResponse(format!("response is not UTF-8: {error}"))
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -455,15 +462,30 @@ fn parse_search_results(html: &str, maximum: usize) -> Vec<SearchResult> {
             cursor = close + 4;
             continue;
         };
-        let title = normalize_whitespace(&strip_tags(&decode_html_entities(&html[open_end + 1..close])));
+        let title = normalize_whitespace(&strip_tags(&decode_html_entities(
+            &html[open_end + 1..close],
+        )));
         let snippet_start = close + 4;
         let snippet = find_case_insensitive_from(html, "result__snippet", snippet_start)
-            .and_then(|position| html[position..].find('>').map(|offset| position + offset + 1))
-            .and_then(|start| html[start..].to_ascii_lowercase().find('<').map(|offset| start + offset))
+            .and_then(|position| {
+                html[position..]
+                    .find('>')
+                    .map(|offset| position + offset + 1)
+            })
+            .and_then(|start| {
+                html[start..]
+                    .to_ascii_lowercase()
+                    .find('<')
+                    .map(|offset| start + offset)
+            })
             .map(|end| normalize_whitespace(&strip_tags(&decode_html_entities(&html[start..end]))))
             .unwrap_or_default();
         if !title.is_empty() && !results.iter().any(|item: &SearchResult| item.url == url) {
-            results.push(SearchResult { title, url, snippet });
+            results.push(SearchResult {
+                title,
+                url,
+                snippet,
+            });
         }
         cursor = close + 4;
     }
@@ -510,7 +532,10 @@ fn validate_public_web_url(url: &Url) -> Result<(), BuiltinToolError> {
             "credentials in web URLs are not allowed".to_owned(),
         ));
     }
-    if host.chars().all(|character| character.is_ascii_digit() || character == '.') {
+    if host
+        .chars()
+        .all(|character| character.is_ascii_digit() || character == '.')
+    {
         return Err(BuiltinToolError::InvalidArguments(
             "numeric web hosts are not allowed".to_owned(),
         ));
@@ -595,7 +620,12 @@ fn attribute_value(tag: &str, name: &str) -> Option<String> {
         let end = rest[1..].find(quote)? + 1;
         Some(rest[1..end].to_owned())
     } else {
-        Some(rest.split_whitespace().next()?.trim_end_matches('>').to_owned())
+        Some(
+            rest.split_whitespace()
+                .next()?
+                .trim_end_matches('>')
+                .to_owned(),
+        )
     }
 }
 
@@ -628,7 +658,9 @@ fn remove_html_block(mut value: String, tag: &str) -> String {
     let close = format!("</{tag}>");
     loop {
         let lower = value.to_ascii_lowercase();
-        let Some(start) = lower.find(&open) else { return value };
+        let Some(start) = lower.find(&open) else {
+            return value;
+        };
         let Some(close_offset) = lower[start..].find(&close) else {
             value.truncate(start);
             return value;
@@ -683,7 +715,10 @@ impl<'a> ArithmeticParser<'a> {
                 "expression must be non-empty ASCII under 256 bytes".to_owned(),
             ));
         }
-        Ok(Self { input: expression.as_bytes(), position: 0 })
+        Ok(Self {
+            input: expression.as_bytes(),
+            position: 0,
+        })
     }
 
     fn parse(mut self) -> Result<f64, BuiltinToolError> {
@@ -694,8 +729,12 @@ impl<'a> ArithmeticParser<'a> {
                 "expression contains an unsupported token".to_owned(),
             ));
         }
-        if value.is_finite() { Ok(value) } else {
-            Err(BuiltinToolError::InvalidArguments("result is not finite".to_owned()))
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Err(BuiltinToolError::InvalidArguments(
+                "result is not finite".to_owned(),
+            ))
         }
     }
 
@@ -704,10 +743,16 @@ impl<'a> ArithmeticParser<'a> {
         loop {
             self.skip_spaces();
             let operation = self.peek();
-            if operation != Some(b'+') && operation != Some(b'-') { break; }
+            if operation != Some(b'+') && operation != Some(b'-') {
+                break;
+            }
             self.position += 1;
             let right = self.term()?;
-            value = if operation == Some(b'+') { value + right } else { value - right };
+            value = if operation == Some(b'+') {
+                value + right
+            } else {
+                value - right
+            };
         }
         Ok(value)
     }
@@ -717,11 +762,15 @@ impl<'a> ArithmeticParser<'a> {
         loop {
             self.skip_spaces();
             let operation = self.peek();
-            if !matches!(operation, Some(b'*' | b'/' | b'%')) { break; }
+            if !matches!(operation, Some(b'*' | b'/' | b'%')) {
+                break;
+            }
             self.position += 1;
             let right = self.factor()?;
             if right == 0.0 && matches!(operation, Some(b'/' | b'%')) {
-                return Err(BuiltinToolError::InvalidArguments("division by zero".to_owned()));
+                return Err(BuiltinToolError::InvalidArguments(
+                    "division by zero".to_owned(),
+                ));
             }
             value = match operation {
                 Some(b'*') => value * right,
@@ -735,14 +784,22 @@ impl<'a> ArithmeticParser<'a> {
 
     fn factor(&mut self) -> Result<f64, BuiltinToolError> {
         self.skip_spaces();
-        if self.peek() == Some(b'+') { self.position += 1; return self.factor(); }
-        if self.peek() == Some(b'-') { self.position += 1; return Ok(-self.factor()?); }
+        if self.peek() == Some(b'+') {
+            self.position += 1;
+            return self.factor();
+        }
+        if self.peek() == Some(b'-') {
+            self.position += 1;
+            return Ok(-self.factor()?);
+        }
         if self.peek() == Some(b'(') {
             self.position += 1;
             let value = self.expression()?;
             self.skip_spaces();
             if self.peek() != Some(b')') {
-                return Err(BuiltinToolError::InvalidArguments("missing closing parenthesis".to_owned()));
+                return Err(BuiltinToolError::InvalidArguments(
+                    "missing closing parenthesis".to_owned(),
+                ));
             }
             self.position += 1;
             return Ok(value);
@@ -755,12 +812,20 @@ impl<'a> ArithmeticParser<'a> {
         let start = self.position;
         let mut dots = 0;
         while let Some(character) = self.peek() {
-            if character == b'.' { dots += 1; if dots > 1 { break; } }
-            else if !character.is_ascii_digit() { break; }
+            if character == b'.' {
+                dots += 1;
+                if dots > 1 {
+                    break;
+                }
+            } else if !character.is_ascii_digit() {
+                break;
+            }
             self.position += 1;
         }
         if self.position == start {
-            return Err(BuiltinToolError::InvalidArguments("number expected".to_owned()));
+            return Err(BuiltinToolError::InvalidArguments(
+                "number expected".to_owned(),
+            ));
         }
         std::str::from_utf8(&self.input[start..self.position])
             .ok()
@@ -770,11 +835,16 @@ impl<'a> ArithmeticParser<'a> {
     }
 
     fn skip_spaces(&mut self) {
-        while self.peek().is_some_and(|character| character.is_ascii_whitespace()) {
+        while self
+            .peek()
+            .is_some_and(|character| character.is_ascii_whitespace())
+        {
             self.position += 1;
         }
     }
-    fn peek(&self) -> Option<u8> { self.input.get(self.position).copied() }
+    fn peek(&self) -> Option<u8> {
+        self.input.get(self.position).copied()
+    }
 }
 
 #[cfg(test)]
