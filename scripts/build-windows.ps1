@@ -12,6 +12,8 @@ function Require-Command([string]$Name, [string]$InstallHint) {
 Require-Command "cargo" "Install Rust with the stable MSVC toolchain."
 Require-Command "rustup" "Install rustup from https://rustup.rs."
 Require-Command "npm" "Install the Node.js LTS release."
+Require-Command "git" "Install Git so the pinned llama.cpp runtime can be built."
+Require-Command "cmake" "Install CMake and the Visual Studio C++ workload."
 
 Write-Host "Checking the Windows MSVC Rust target..." -ForegroundColor Cyan
 rustup default stable-msvc
@@ -29,6 +31,9 @@ Write-Host "Running Rust formatting, lint and tests..." -ForegroundColor Cyan
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+Write-Host "Building the pinned native llama.cpp runtime..." -ForegroundColor Cyan
+& (Join-Path $PSScriptRoot "build-llama-runtime.ps1")
 
 Write-Host "Building the Tauri release bundles..." -ForegroundColor Cyan
 npm --prefix apps/desktop exec -- tauri build --target x86_64-pc-windows-msvc

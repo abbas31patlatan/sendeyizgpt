@@ -1,53 +1,3475 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { getRuntimeStatus, stopEverything } from "./ipc";
-import { formatBytes, initialUnavailableStatus, type RuntimeStatus } from "./protocol";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  cancelOperation,
+  discoverLocalModels,
+  deleteAutomation,
+  deleteModelLibrary,
+  getNativeRuntimeStatus,
+  deletePersistedConversation,
+  deletePersistedWorkspace,
+  estimateModelLoad,
+  getRuntimeStatus,
+  inspectProvider,
+  loadProviderModel,
+  listenChatEvents,
+  listenModelChanges,
+  loadAutomations,
+  loadLocalModels,
+  loadModelLibraries,
+  loadModelProfiles,
+  loadPersistedConversations,
+  loadPersistedWorkspaces,
+  saveAutomation,
+  saveModelLibrary,
+  saveModelProfile,
+  savePersistedConversation,
+  savePersistedWorkspace,
+  scanModelLibrary,
+  startChat,
+  startNativeModel,
+  stopEverything,
+  stopNativeModel,
+  validateWorkspacePath,
+} from "./ipc";
+import {
+  formatBytes,
+  initialNativeRuntimeStatus,
+  initialUnavailableStatus,
+  type Automation,
+  type AutomationStatus,
+  type ChatEvent,
+  type LoadPreset,
+  type LocalModel,
+  type ModelLibrary,
+  type ModelLoadEstimate,
+  type ModelDiscoverySummary,
+  type ModelProfile,
+  type ModelScanSummary,
+  type NativeRuntimePhase,
+  type NativeRuntimeStatus,
+  type ChatMessage,
+  type PersistedConversation,
+  type PersistedWorkspace,
+  type ProviderConfig,
+  type ProviderDiagnostics,
+  type ProviderModel,
+  type RuntimeStatus,
+  type WorkspacePathDiagnostics,
+} from "./protocol";
+import { translate, type Locale, type TranslationKey } from "./i18n";
+import { ToolActivity } from "./ToolActivity";
+
+const MessageContent = lazy(() => import("./MessageContent").then((module) => ({ default: module.MessageContent })));
+import "./chat.css";
 
 type View = "chats" | "workspaces" | "models" | "automations";
+type MessageStatus = "streaming" | "error" | "cancelled";
 
-const navigation: Array<{ id: View; label: string; glyph: string }> = [
-  { id: "chats", label: "Chats", glyph: "◌" },
-  { id: "workspaces", label: "Workspaces", glyph: "⌘" },
-  { id: "models", label: "Model library", glyph: "▣" },
-  { id: "automations", label: "Automations", glyph: "◷" },
+type StoredMessage = ChatMessage & {
+  id: string;
+  createdAt: number;
+  reasoning?: string;
+  toolActivity?: string[];
+  status?: MessageStatus;
+};
+
+type Conversation = {
+  id: string;
+  title: string;
+  messages: StoredMessage[];
+  updatedAt: number;
+};
+
+type Workspace = PersistedWorkspace;
+
+type ProviderSettings = {
+  base_url: string;
+  model: string;
+  api_key: string;
+  max_tokens: number;
+  temperature: number;
+  system_prompt: string;
+  worker_enabled: boolean;
+  worker_base_url: string;
+  worker_model: string;
+  worker_api_key: string;
+  web_tools_enabled: boolean;
+};
+
+type Theme = "system" | "dark" | "light";
+
+type UiPreferences = {
+  locale: Locale;
+  theme: Theme;
+};
+
+type ChatBinding = {
+  conversationId: string;
+  assistantId: string;
+  automationId?: string;
+};
+
+const CONVERSATIONS_KEY = "aegis.conversations.v1";
+const SETTINGS_KEY = "aegis.provider-settings.v1";
+const UI_PREFERENCES_KEY = "aegis.ui-preferences.v1";
+const WORKSPACES_KEY = "aegis.workspaces.v1";
+const NATIVE_RUNTIME_PATH_KEY = "aegis.native-runtime-path.v1";
+const AUTOMATIONS_KEY = "aegis.automations.v1";
+
+const navigation: Array<{ id: View; labelKey: TranslationKey; glyph: string }> = [
+  { id: "chats", labelKey: "navChats", glyph: "◌" },
+  { id: "workspaces", labelKey: "navWorkspaces", glyph: "⌘" },
+  { id: "models", labelKey: "navModels", glyph: "▣" },
+  { id: "automations", labelKey: "navAutomations", glyph: "◷" },
 ];
+
+const defaultSettings: ProviderSettings = {
+  base_url: "http://127.0.0.1:11434/v1",
+  model: "llama3.2",
+  api_key: "",
+  max_tokens: 1024,
+  temperature: 0.7,
+  system_prompt: "",
+  worker_enabled: false,
+  worker_base_url: "http://127.0.0.1:1235/v1",
+  worker_model: "",
+  worker_api_key: "",
+  web_tools_enabled: false,
+};
+
+function createId(prefix: string): string {
+  return prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+}
+
+function newConversation(title = "New conversation"): Conversation {
+  return {
+    id: createId("conversation"),
+    title,
+    messages: [],
+    updatedAt: Date.now(),
+  };
+}
+
+function isConversation(value: unknown): value is Conversation {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<Conversation>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.title === "string" &&
+    typeof candidate.updatedAt === "number" &&
+    Array.isArray(candidate.messages)
+  );
+}
+
+function loadConversations(): Conversation[] {
+  try {
+    const raw = window.localStorage.getItem(CONVERSATIONS_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isConversation) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadSettings(): ProviderSettings {
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_KEY);
+    if (!raw) {
+      return defaultSettings;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) {
+      return defaultSettings;
+    }
+    const value = parsed as Partial<ProviderSettings>;
+    return {
+      base_url: typeof value.base_url === "string" ? value.base_url : defaultSettings.base_url,
+      model: typeof value.model === "string" ? value.model : defaultSettings.model,
+      api_key: "",
+      max_tokens:
+        typeof value.max_tokens === "number" && Number.isFinite(value.max_tokens)
+          ? Math.max(1, Math.floor(value.max_tokens))
+          : defaultSettings.max_tokens,
+      temperature:
+        typeof value.temperature === "number" && Number.isFinite(value.temperature)
+          ? Math.min(2, Math.max(0, value.temperature))
+          : defaultSettings.temperature,
+      system_prompt:
+        typeof value.system_prompt === "string"
+          ? value.system_prompt.slice(0, 16_384)
+          : defaultSettings.system_prompt,
+      worker_enabled: value.worker_enabled === true,
+      worker_base_url:
+        typeof value.worker_base_url === "string"
+          ? value.worker_base_url
+          : defaultSettings.worker_base_url,
+      worker_model:
+        typeof value.worker_model === "string" ? value.worker_model : defaultSettings.worker_model,
+      worker_api_key: "",
+      web_tools_enabled: value.web_tools_enabled === true,
+    };
+  } catch {
+    return defaultSettings;
+  }
+}
+
+
+function loadNativeRuntimePath(): string {
+  try {
+    return (window.localStorage.getItem(NATIVE_RUNTIME_PATH_KEY) ?? "").slice(0, 4096);
+  } catch {
+    return "";
+  }
+}
+
+function loadUiPreferences(): UiPreferences {
+  try {
+    const raw = window.localStorage.getItem(UI_PREFERENCES_KEY);
+    const parsed = raw ? JSON.parse(raw) as Partial<UiPreferences> : {};
+    const locale: Locale =
+      parsed.locale === "tr" || parsed.locale === "en"
+        ? parsed.locale
+        : navigator.language.toLowerCase().startsWith("tr") ? "tr" : "en";
+    const theme: Theme =
+      parsed.theme === "dark" || parsed.theme === "light" || parsed.theme === "system"
+        ? parsed.theme
+        : "system";
+    return { locale, theme };
+  } catch {
+    return {
+      locale: navigator.language.toLowerCase().startsWith("tr") ? "tr" : "en",
+      theme: "system",
+    };
+  }
+}
+
+function isWorkspace(value: unknown): value is Workspace {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<Workspace>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    typeof candidate.rootPath === "string" &&
+    typeof candidate.createdAt === "number" &&
+    typeof candidate.updatedAt === "number"
+  );
+}
+
+function isAutomation(value: unknown): value is Automation {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<Automation>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    typeof candidate.prompt === "string" &&
+    typeof candidate.intervalMinutes === "number" &&
+    typeof candidate.enabled === "boolean" &&
+    (typeof candidate.lastRunAt === "number" || candidate.lastRunAt === null) &&
+    (typeof candidate.nextRunAt === "number" || candidate.nextRunAt === null) &&
+    typeof candidate.lastStatus === "string" &&
+    (typeof candidate.lastError === "string" || candidate.lastError === null) &&
+    (typeof candidate.lastConversationId === "string" || candidate.lastConversationId === null) &&
+    typeof candidate.createdAt === "number" &&
+    typeof candidate.updatedAt === "number"
+  );
+}
+
+function normalizeAutomation(automation: Automation): Automation {
+  const intervalMinutes = Math.min(10080, Math.max(1, Math.floor(automation.intervalMinutes)));
+  return {
+    ...automation,
+    intervalMinutes,
+    nextRunAt: automation.enabled
+      ? automation.nextRunAt ?? automation.updatedAt + intervalMinutes * 60_000
+      : null,
+  };
+}
+
+function loadLocalAutomations(): Automation[] {
+  try {
+    const raw = window.localStorage.getItem(AUTOMATIONS_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter(isAutomation).map(normalizeAutomation)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadLocalWorkspaces(): Workspace[] {
+  try {
+    const raw = window.localStorage.getItem(WORKSPACES_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isWorkspace) : [];
+  } catch {
+    return [];
+  }
+}
+
+function fromPersistedConversation(value: PersistedConversation): Conversation {
+  return {
+    id: value.id,
+    title: value.title,
+    updatedAt: value.updatedAt,
+    messages: value.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      reasoning: message.reasoning ?? undefined,
+      createdAt: message.createdAt,
+    })),
+  };
+}
+
+function toPersistedConversation(value: Conversation): PersistedConversation {
+  return {
+    id: value.id,
+    title: value.title,
+    updatedAt: value.updatedAt,
+    messages: value.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      reasoning: message.reasoning ?? null,
+      createdAt: message.createdAt,
+    })),
+  };
+}
+
+function mergeConversations(...groups: Conversation[][]): Conversation[] {
+  const byId = new Map<string, Conversation>();
+  for (const group of groups) {
+    for (const conversation of group) {
+      const current = byId.get(conversation.id);
+      if (!current || conversation.updatedAt >= current.updatedAt) {
+        byId.set(conversation.id, conversation);
+      }
+    }
+  }
+  return [...byId.values()].sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function safeExportName(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return normalized || "aegis-conversation";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+
+function automationStatusKey(status: AutomationStatus): TranslationKey {
+  switch (status) {
+    case "running":
+      return "automationStatusRunning";
+    case "success":
+      return "automationStatusSuccess";
+    case "error":
+      return "automationStatusError";
+    case "cancelled":
+      return "automationStatusCancelled";
+    case "idle":
+    default:
+      return "automationStatusIdle";
+  }
+}
+
+function nativeRuntimePhaseKey(phase: NativeRuntimePhase): TranslationKey {
+  switch (phase) {
+    case "starting":
+      return "nativeRuntimePhaseStarting";
+    case "loading":
+      return "nativeRuntimePhaseLoading";
+    case "ready":
+      return "nativeRuntimePhaseReady";
+    case "stopping":
+      return "nativeRuntimePhaseStopping";
+    case "error":
+      return "nativeRuntimePhaseError";
+    case "stopped":
+    default:
+      return "nativeRuntimePhaseStopped";
+  }
+}
+
+function formatMetricRate(value: number | null, localeTag: string): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
+  }
+  return value.toLocaleString(localeTag, { maximumFractionDigits: 1 }) + " tok/s";
+}
+
+function formatMetricCount(value: number | null, localeTag: string): string {
+  return value === null ? "—" : value.toLocaleString(localeTag);
+}
+
+function formatParameterCount(value: number | null, localeTag: string): string {
+  if (value === null) {
+    return "—";
+  }
+  if (value >= 1_000_000_000_000) {
+    return (value / 1_000_000_000_000).toFixed(1) + "T";
+  }
+  if (value >= 1_000_000_000) {
+    return (value / 1_000_000_000).toFixed(1) + "B";
+  }
+  if (value >= 1_000_000) {
+    return (value / 1_000_000).toFixed(1) + "M";
+  }
+  return value.toLocaleString(localeTag);
+}
+
+function updateStoredMessage(
+  conversation: Conversation,
+  messageId: string,
+  update: (message: StoredMessage) => StoredMessage,
+): Conversation {
+  return {
+    ...conversation,
+    messages: conversation.messages.map((message) =>
+      message.id === messageId ? update(message) : message,
+    ),
+    updatedAt: Date.now(),
+  };
+}
 
 function App() {
   const [view, setView] = useState<View>("chats");
   const [runtime, setRuntime] = useState<RuntimeStatus>(initialUnavailableStatus);
+  const [conversations, setConversations] = useState<Conversation[]>(loadConversations);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(() => {
+    const saved = loadConversations();
+    return saved[0]?.id ?? null;
+  });
+  const [settings, setSettings] = useState<ProviderSettings>(loadSettings);
+  const [uiPreferences, setUiPreferences] = useState<UiPreferences>(loadUiPreferences);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>(loadLocalWorkspaces);
+  const [automations, setAutomations] = useState<Automation[]>(loadLocalAutomations);
+  const [automationName, setAutomationName] = useState("");
+  const [automationPrompt, setAutomationPrompt] = useState("");
+  const [automationIntervalMinutes, setAutomationIntervalMinutes] = useState(60);
+  const [automationEnabledOnCreate, setAutomationEnabledOnCreate] = useState(false);
+  const [automationMessage, setAutomationMessage] = useState<string | null>(null);
+  const [automationBusy, setAutomationBusy] = useState(false);
+  const [editingAutomationId, setEditingAutomationId] = useState<string | null>(null);
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [workspaceDiagnostics, setWorkspaceDiagnostics] =
+    useState<WorkspacePathDiagnostics | null>(null);
+  const [workspaceMessage, setWorkspaceMessage] = useState<string | null>(null);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [modelLibraries, setModelLibraries] = useState<ModelLibrary[]>([]);
+  const [localModels, setLocalModels] = useState<LocalModel[]>([]);
+  const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
+  const [modelLibraryName, setModelLibraryName] = useState("");
+  const [modelLibraryPath, setModelLibraryPath] = useState("");
+  const [modelLibraryDiagnostics, setModelLibraryDiagnostics] =
+    useState<WorkspacePathDiagnostics | null>(null);
+  const [modelLibraryMessage, setModelLibraryMessage] = useState<string | null>(null);
+  const [modelLibraryBusy, setModelLibraryBusy] = useState(false);
+  const [modelScanSummary, setModelScanSummary] = useState<ModelScanSummary | null>(null);
+  const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(null);
+  const [localModelQuery, setLocalModelQuery] = useState("");
+  const [loadPreset, setLoadPreset] = useState<LoadPreset>("balanced");
+  const [loadEstimate, setLoadEstimate] = useState<ModelLoadEstimate | null>(null);
+  const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [nativeRuntime, setNativeRuntime] = useState<NativeRuntimeStatus>(
+    initialNativeRuntimeStatus,
+  );
+  const [nativeRuntimePath, setNativeRuntimePath] = useState(loadNativeRuntimePath);
+  const [nativeRuntimeBusy, setNativeRuntimeBusy] = useState(false);
+  const [nativeRuntimeMessage, setNativeRuntimeMessage] = useState<string | null>(null);
+  const [persistenceHydrated, setPersistenceHydrated] = useState(false);
+  const [workspacesHydrated, setWorkspacesHydrated] = useState(false);
+  const [automationsHydrated, setAutomationsHydrated] = useState(false);
   const [draft, setDraft] = useState("");
+  const [conversationQuery, setConversationQuery] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [streamingOperation, setStreamingOperation] = useState<string | null>(null);
   const [stopMessage, setStopMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [modelOptions, setModelOptions] = useState<ProviderModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [workerLoading, setWorkerLoading] = useState(false);
+  const [bindingModel, setBindingModel] = useState<string | null>(null);
+  const [providerDiagnostics, setProviderDiagnostics] =
+    useState<ProviderDiagnostics | null>(null);
+  const [workerDiagnostics, setWorkerDiagnostics] =
+    useState<ProviderDiagnostics | null>(null);
+  const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
+  const [autoDiscoveryBusy, setAutoDiscoveryBusy] = useState(false);
+  const [autoDiscoveryMessage, setAutoDiscoveryMessage] = useState<string | null>(null);
+  const operationBindings = useRef(new Map<string, ChatBinding>());
+  const automationOperations = useRef(new Map<string, string>());
+  const queuedEvents = useRef(new Map<string, ChatEvent[]>());
+  const streamDeltas = useRef(
+    new Map<string, { content: string; reasoning: string }>(),
+  );
+  const streamFrame = useRef<number | null>(null);
+  const conversationSearchRef = useRef<HTMLInputElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const tx = useCallback(
+    (key: TranslationKey, values?: Record<string, string | number>) =>
+      translate(uiPreferences.locale, key, values),
+    [uiPreferences.locale],
+  );
+  const localeTag = uiPreferences.locale === "tr" ? "tr-TR" : "en-US";
+
+  const activeConversation = useMemo(
+    () => conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
+    [activeConversationId, conversations],
+  );
+  const activeMessages = activeConversation?.messages ?? [];
+  const visibleConversations = useMemo(() => {
+    const query = conversationQuery.trim().toLocaleLowerCase(localeTag);
+    return [...conversations]
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .filter((conversation) =>
+        !query || conversation.title.toLocaleLowerCase(localeTag).includes(query),
+      );
+  }, [conversationQuery, conversations, localeTag]);
+  const isStreaming = streamingOperation !== null;
+  const coreReady = runtime.core_state === "ready";
+  const selectedProviderModel = useMemo(
+    () => modelOptions.find((model) => model.id === settings.model.trim()) ?? null,
+    [modelOptions, settings.model],
+  );
+
+  const selectedLocalModel = useMemo(
+    () => localModels.find((model) => model.id === selectedLocalModelId) ?? null,
+    [localModels, selectedLocalModelId],
+  );
+  const visibleLocalModels = useMemo(() => {
+    const query = localModelQuery.trim().toLocaleLowerCase(localeTag);
+    if (!query) {
+      return localModels;
+    }
+    return localModels.filter((model) =>
+      [model.displayName, model.filePath, model.architecture, model.quantization, model.family]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.toLocaleLowerCase(localeTag).includes(query)),
+    );
+  }, [localModelQuery, localModels, localeTag]);
 
   const refreshRuntime = useCallback(async () => {
-    try {
-      setRuntime(await getRuntimeStatus());
-    } catch {
+    const [coreResult, nativeResult] = await Promise.allSettled([
+      getRuntimeStatus(),
+      getNativeRuntimeStatus(),
+    ]);
+    if (coreResult.status === "fulfilled") {
+      setRuntime(coreResult.value);
+    } else {
       setRuntime(initialUnavailableStatus);
+    }
+    if (nativeResult.status === "fulfilled") {
+      setNativeRuntime(nativeResult.value);
+    } else {
+      setNativeRuntime(initialNativeRuntimeStatus);
+    }
+  }, []);
+
+  const updateConversation = useCallback(
+    (conversationId: string, updater: (conversation: Conversation) => Conversation) => {
+      setConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === conversationId ? updater(conversation) : conversation,
+        ),
+      );
+    },
+    [],
+  );
+
+  const updateAutomation = useCallback(
+    (automationId: string, updater: (automation: Automation) => Automation) => {
+      setAutomations((current) =>
+        current.map((automation) =>
+          automation.id === automationId ? updater(automation) : automation,
+        ),
+      );
+    },
+    [],
+  );
+
+  const markAutomationStarted = useCallback(
+    (automationId: string, conversationId: string) => {
+      const startedAt = Date.now();
+      updateAutomation(automationId, (automation) => ({
+        ...automation,
+        lastRunAt: startedAt,
+        nextRunAt: automation.enabled
+          ? startedAt + automation.intervalMinutes * 60_000
+          : null,
+        lastStatus: "running",
+        lastError: null,
+        lastConversationId: conversationId,
+        updatedAt: startedAt,
+      }));
+    },
+    [updateAutomation],
+  );
+
+  const markAutomationFinished = useCallback(
+    (automationId: string, status: AutomationStatus, lastError: string | null = null) => {
+      updateAutomation(automationId, (automation) => ({
+        ...automation,
+        lastStatus: status,
+        lastError,
+        updatedAt: Date.now(),
+      }));
+    },
+    [updateAutomation],
+  );
+
+  const flushStreamDeltas = useCallback(() => {
+    streamFrame.current = null;
+    const updates: Array<ChatBinding & { content: string; reasoning: string }> = [];
+
+    for (const [operationId, delta] of streamDeltas.current) {
+      const binding = operationBindings.current.get(operationId);
+      if (!binding) {
+        continue;
+      }
+      updates.push({ ...binding, ...delta });
+      streamDeltas.current.delete(operationId);
+    }
+
+    if (updates.length === 0) {
+      return;
+    }
+
+    setConversations((current) =>
+      current.map((conversation) => {
+        const conversationUpdates = updates.filter(
+          (update) => update.conversationId === conversation.id,
+        );
+        if (conversationUpdates.length === 0) {
+          return conversation;
+        }
+        return {
+          ...conversation,
+          updatedAt: Date.now(),
+          messages: conversation.messages.map((message) => {
+            const update = conversationUpdates.find(
+              (candidate) => candidate.assistantId === message.id,
+            );
+            if (!update) {
+              return message;
+            }
+            return {
+              ...message,
+              content: message.content + update.content,
+              reasoning: (message.reasoning ?? "") + update.reasoning,
+              status: "streaming",
+            };
+          }),
+        };
+      }),
+    );
+  }, []);
+
+  const scheduleStreamFlush = useCallback(() => {
+    if (streamFrame.current === null) {
+      streamFrame.current = window.requestAnimationFrame(flushStreamDeltas);
+    }
+  }, [flushStreamDeltas]);
+
+  const processBoundChatEvent = useCallback(
+    (event: ChatEvent, binding: ChatBinding) => {
+      if (event.type === "token" || event.type === "reasoning") {
+        const current = streamDeltas.current.get(event.operation_id) ?? {
+          content: "",
+          reasoning: "",
+        };
+        if (event.type === "token") {
+          current.content += event.text;
+        } else {
+          current.reasoning += event.text;
+        }
+        streamDeltas.current.set(event.operation_id, current);
+        scheduleStreamFlush();
+        return;
+      }
+
+      if (event.type === "tool") {
+        updateConversation(binding.conversationId, (conversation) =>
+          updateStoredMessage(conversation, binding.assistantId, (message) => ({
+            ...message,
+            toolActivity: [
+              ...(message.toolActivity ?? []).slice(-15),
+              `${event.tool_id} · ${event.detail}`,
+            ],
+          })),
+        );
+        return;
+      }
+
+      if (streamFrame.current !== null) {
+        window.cancelAnimationFrame(streamFrame.current);
+        streamFrame.current = null;
+      }
+      flushStreamDeltas();
+
+      if (event.type === "failed") {
+        if (!binding.automationId) {
+          setError(event.message);
+        }
+        updateConversation(binding.conversationId, (conversation) =>
+          updateStoredMessage(conversation, binding.assistantId, (message) => ({
+            ...message,
+            content: message.content || tx("providerError", { message: event.message }),
+            status: "error",
+          })),
+        );
+      } else if (event.type === "cancelled") {
+        updateConversation(binding.conversationId, (conversation) =>
+          updateStoredMessage(conversation, binding.assistantId, (message) => ({
+            ...message,
+            content: message.content || tx("generationCancelled"),
+            status: "cancelled",
+          })),
+        );
+      } else if (event.type === "finished") {
+        updateConversation(binding.conversationId, (conversation) =>
+          updateStoredMessage(conversation, binding.assistantId, (message) => {
+            const completed = { ...message };
+            delete completed.status;
+            return completed;
+          }),
+        );
+      }
+
+      if (
+        event.type === "finished" ||
+        event.type === "failed" ||
+        event.type === "cancelled"
+      ) {
+        if (binding.automationId) {
+          automationOperations.current.delete(binding.automationId);
+          markAutomationFinished(
+            binding.automationId,
+            event.type === "finished"
+              ? "success"
+              : event.type === "failed"
+                ? "error"
+                : "cancelled",
+            event.type === "failed" ? event.message : null,
+          );
+        }
+        operationBindings.current.delete(event.operation_id);
+        queuedEvents.current.delete(event.operation_id);
+        setStreamingOperation((current) =>
+          current === event.operation_id ? null : current,
+        );
+      }
+    },
+    [
+      flushStreamDeltas,
+      markAutomationFinished,
+      scheduleStreamFlush,
+      tx,
+      updateConversation,
+    ],
+  );
+
+  const onChatEvent = useCallback(
+    (event: ChatEvent) => {
+      if (event.type === "started") {
+        setStreamingOperation(event.operation_id);
+        return;
+      }
+      const binding = operationBindings.current.get(event.operation_id);
+      if (!binding) {
+        const pending = queuedEvents.current.get(event.operation_id) ?? [];
+        pending.push(event);
+        queuedEvents.current.set(event.operation_id, pending.slice(-256));
+        return;
+      }
+      processBoundChatEvent(event, binding);
+    },
+    [processBoundChatEvent],
+  );
+
+  useEffect(() => {
+    void refreshRuntime();
+    const runtimeTimer = window.setInterval(() => void refreshRuntime(), 3000);
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listenChatEvents(onChatEvent).then((stopListening) => {
+      if (disposed) {
+        stopListening();
+      } else {
+        unlisten = stopListening;
+      }
+    }).catch(() => {
+      // The Vite preview is intentionally usable without the Tauri event bridge.
+    });
+    return () => {
+      disposed = true;
+      window.clearInterval(runtimeTimer);
+      unlisten?.();
+    };
+  }, [onChatEvent, refreshRuntime]);
+
+  useEffect(() => {
+    let disposed = false;
+    void loadPersistedConversations()
+      .then((stored) => {
+        if (disposed) {
+          return;
+        }
+        const restored = stored.map(fromPersistedConversation);
+        if (restored.length > 0) {
+          setConversations((current) => mergeConversations(restored, current));
+          setActiveConversationId((current) => current ?? restored[0]?.id ?? null);
+        }
+        setPersistenceHydrated(true);
+      })
+      .catch(() => {
+        if (!disposed) {
+          setPersistenceHydrated(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void loadPersistedWorkspaces()
+      .then((stored) => {
+        if (disposed) {
+          return;
+        }
+        if (stored.length > 0) {
+          setWorkspaces((current) => {
+            const byId = new Map(current.map((workspace) => [workspace.id, workspace]));
+            for (const workspace of stored) {
+              const currentWorkspace = byId.get(workspace.id);
+              if (!currentWorkspace || workspace.updatedAt >= currentWorkspace.updatedAt) {
+                byId.set(workspace.id, workspace);
+              }
+            }
+            return [...byId.values()].sort(
+              (left, right) => right.updatedAt - left.updatedAt,
+            );
+          });
+        }
+        setWorkspacesHydrated(true);
+      })
+      .catch(() => {
+        if (!disposed) {
+          setWorkspacesHydrated(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void loadAutomations()
+      .then((stored) => {
+        if (disposed) {
+          return;
+        }
+        if (stored.length > 0) {
+          setAutomations((current) => {
+            const byId = new Map(current.map((automation) => [automation.id, automation]));
+            for (const automation of stored.map(normalizeAutomation)) {
+              const currentAutomation = byId.get(automation.id);
+              if (!currentAutomation || automation.updatedAt >= currentAutomation.updatedAt) {
+                byId.set(automation.id, automation);
+              }
+            }
+            return [...byId.values()].sort(
+              (left, right) =>
+                Number(right.enabled) - Number(left.enabled) ||
+                right.updatedAt - left.updatedAt,
+            );
+          });
+        }
+        setAutomationsHydrated(true);
+      })
+      .catch(() => {
+        if (!disposed) {
+          setAutomationsHydrated(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void Promise.all([loadModelLibraries(), loadLocalModels(), loadModelProfiles()])
+      .then(([libraries, models, profiles]) => {
+        if (disposed) {
+          return;
+        }
+        setModelLibraries(libraries);
+        setLocalModels(models);
+        setModelProfiles(profiles);
+        setSelectedLocalModelId((current) => current ?? models[0]?.id ?? null);
+      })
+      .catch(() => {
+        // The native model catalog is intentionally unavailable in Vite preview.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    void discoverLocalModels()
+      .then((summary) => {
+        if (disposed) {
+          return;
+        }
+        setModelLibraries(summary.libraries);
+        setLocalModels(summary.models);
+        setSelectedLocalModelId((current) => current ?? summary.models[0]?.id ?? null);
+      })
+      .catch(() => {
+        // Auto-discovery is a native-only enhancement; manual paths remain available.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const refresh = () => {
+      if (disposed || autoDiscoveryBusy || document.visibilityState === "hidden") {
+        return;
+      }
+      void discoverLocalModels()
+        .then((summary) => {
+          if (disposed) {
+            return;
+          }
+          setModelLibraries(summary.libraries);
+          setLocalModels(summary.models);
+          setSelectedLocalModelId((current) =>
+            current && summary.models.some((model) => model.id === current)
+              ? current
+              : summary.models[0]?.id ?? null,
+          );
+        })
+        .catch(() => {
+          // Background discovery is best effort; the indexed inventory remains usable.
+        });
+    };
+    const timer = window.setInterval(refresh, 60_000);
+    let changeTimer: number | undefined;
+    let unlisten: (() => void) | undefined;
+    void listenModelChanges(() => {
+      window.clearTimeout(changeTimer);
+      changeTimer = window.setTimeout(refresh, 1500);
+    }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.clearTimeout(changeTimer);
+      unlisten?.();
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [autoDiscoveryBusy]);
+
+  useEffect(() => {
+    if (!selectedLocalModelId) {
+      setLoadEstimate(null);
+      return;
+    }
+    let disposed = false;
+    setProfileMessage(null);
+    void estimateModelLoad(selectedLocalModelId, loadPreset)
+      .then((estimate) => {
+        if (!disposed) {
+          setLoadEstimate(estimate);
+        }
+      })
+      .catch((estimateError) => {
+        if (!disposed) {
+          setLoadEstimate(null);
+          setProfileMessage(errorMessage(estimateError));
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [loadPreset, selectedLocalModelId]);
+
+  useEffect(() => {
+    const persistenceTimer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations));
+        const nonSecretSettings = {
+          base_url: settings.base_url,
+          model: settings.model,
+          max_tokens: settings.max_tokens,
+          temperature: settings.temperature,
+          system_prompt: settings.system_prompt,
+          worker_enabled: settings.worker_enabled,
+          worker_base_url: settings.worker_base_url,
+          worker_model: settings.worker_model,
+          web_tools_enabled: settings.web_tools_enabled,
+        };
+        window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(nonSecretSettings));
+        window.localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
+        window.localStorage.setItem(AUTOMATIONS_KEY, JSON.stringify(automations));
+        window.localStorage.setItem(
+          NATIVE_RUNTIME_PATH_KEY,
+          nativeRuntimePath.trim().slice(0, 4096),
+        );
+        window.localStorage.setItem(UI_PREFERENCES_KEY, JSON.stringify(uiPreferences));
+      } catch {
+        // Persistence is best effort; the chat remains usable in private browsing.
+      }
+    }, 300);
+    return () => window.clearTimeout(persistenceTimer);
+  }, [
+    automations,
+    conversations,
+    nativeRuntimePath,
+    settings,
+    uiPreferences,
+    workspaces,
+  ]);
+
+  useEffect(() => {
+    if (!persistenceHydrated || isStreaming) {
+      return;
+    }
+    const persistenceTimer = window.setTimeout(() => {
+      for (const conversation of conversations) {
+        void savePersistedConversation(toPersistedConversation(conversation)).catch(() => {
+          // Vite preview and private browser mode intentionally have no native database.
+        });
+      }
+    }, 450);
+    return () => window.clearTimeout(persistenceTimer);
+  }, [conversations, isStreaming, persistenceHydrated]);
+
+  useEffect(() => {
+    if (!workspacesHydrated) {
+      return;
+    }
+    const persistenceTimer = window.setTimeout(() => {
+      for (const workspace of workspaces) {
+        void savePersistedWorkspace(workspace).catch(() => {
+          // Vite preview and private browser mode intentionally have no native database.
+        });
+      }
+    }, 450);
+    return () => window.clearTimeout(persistenceTimer);
+  }, [workspaces, workspacesHydrated]);
+
+  useEffect(() => {
+    if (!automationsHydrated) {
+      return;
+    }
+    const persistenceTimer = window.setTimeout(() => {
+      for (const automation of automations) {
+        void saveAutomation(automation).catch(() => {
+          // Local storage remains the fallback in preview mode.
+        });
+      }
+    }, 450);
+    return () => window.clearTimeout(persistenceTimer);
+  }, [automations, automationsHydrated]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      const resolved =
+        uiPreferences.theme === "system"
+          ? media.matches ? "dark" : "light"
+          : uiPreferences.theme;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.lang = uiPreferences.locale;
+    };
+    applyTheme();
+    media.addEventListener("change", applyTheme);
+    return () => media.removeEventListener("change", applyTheme);
+  }, [uiPreferences.locale, uiPreferences.theme]);
+
+  useEffect(() => () => {
+    if (streamFrame.current !== null) {
+      window.cancelAnimationFrame(streamFrame.current);
     }
   }, []);
 
   useEffect(() => {
-    void refreshRuntime();
-  }, [refreshRuntime]);
+    const onShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) {
+        return;
+      }
+      if (event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        const conversation = newConversation(tx("newConversation"));
+        setConversations((current) => [conversation, ...current]);
+        setActiveConversationId(conversation.id);
+        setView("chats");
+        window.requestAnimationFrame(() => composerRef.current?.focus());
+      } else if (event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setView("chats");
+        window.requestAnimationFrame(() => conversationSearchRef.current?.focus());
+      }
+    };
+    window.addEventListener("keydown", onShortcut);
+    return () => window.removeEventListener("keydown", onShortcut);
+  }, [tx]);
 
   const viewTitle = useMemo(
-    () => navigation.find((item) => item.id === view)?.label ?? "Aegis AI",
-    [view],
+    () => tx(navigation.find((item) => item.id === view)?.labelKey ?? "appName"),
+    [tx, view],
   );
+
+  const handleNewChat = () => {
+    const conversation = newConversation(tx("newConversation"));
+    setConversations((current) => [conversation, ...current]);
+    setActiveConversationId(conversation.id);
+    setView("chats");
+    setDraft("");
+    setError(null);
+  };
+
+  const handleSend = async () => {
+    const text = draft.trim();
+    if (!text || isStreaming) {
+      return;
+    }
+
+    const existingMessages = activeConversation?.messages ?? [];
+    const history: ChatMessage[] = [];
+    if (settings.system_prompt.trim()) {
+      history.push({ role: "system", content: settings.system_prompt.trim() });
+    }
+    history.push(
+      ...existingMessages
+        .filter((message) => message.content.trim().length > 0)
+        .map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+    );
+    history.push({ role: "user", content: text });
+
+    const conversationId = activeConversation?.id ?? createId("conversation");
+    const assistantId = createId("message");
+    const now = Date.now();
+    const userMessage: StoredMessage = {
+      id: createId("message"),
+      role: "user",
+      content: text,
+      createdAt: now,
+    };
+    const assistantMessage: StoredMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      createdAt: now + 1,
+      status: "streaming",
+    };
+    const baseConversation: Conversation = activeConversation ?? {
+      id: conversationId,
+      title: "New conversation",
+      messages: [],
+      updatedAt: now,
+    };
+    const title =
+      baseConversation.messages.length === 0
+        ? text.slice(0, 48) + (text.length > 48 ? "…" : "")
+        : baseConversation.title;
+    const nextConversation: Conversation = {
+      ...baseConversation,
+      title,
+      messages: [...baseConversation.messages, userMessage, assistantMessage],
+      updatedAt: now,
+    };
+
+    setConversations((current) => {
+      const exists = current.some((conversation) => conversation.id === conversationId);
+      return exists
+        ? current.map((conversation) =>
+            conversation.id === conversationId ? nextConversation : conversation,
+          )
+        : [nextConversation, ...current];
+    });
+    setActiveConversationId(conversationId);
+    setDraft("");
+    setError(null);
+    setStopMessage(null);
+
+    const provider: ProviderConfig = {
+      base_url: settings.base_url.trim(),
+      model: settings.model.trim(),
+      api_key: settings.api_key.trim() || undefined,
+    };
+    const worker: ProviderConfig | undefined =
+      settings.worker_enabled && settings.worker_base_url.trim() && settings.worker_model.trim()
+        ? {
+            base_url: settings.worker_base_url.trim(),
+            model: settings.worker_model.trim(),
+            api_key: settings.worker_api_key.trim() || undefined,
+          }
+        : undefined;
+
+    try {
+      const started = await startChat({
+        provider,
+        messages: history,
+        max_tokens: settings.max_tokens,
+        temperature: settings.temperature,
+        worker,
+        web_tools: settings.web_tools_enabled,
+      });
+      const binding = { conversationId, assistantId };
+      operationBindings.current.set(started.operation_id, binding);
+      setStreamingOperation(started.operation_id);
+      const pending = queuedEvents.current.get(started.operation_id) ?? [];
+      queuedEvents.current.delete(started.operation_id);
+      for (const event of pending) {
+        processBoundChatEvent(event, binding);
+      }
+      flushStreamDeltas();
+    } catch (sendError) {
+      const message = errorMessage(sendError);
+      setError(message);
+      updateConversation(conversationId, (conversation) =>
+        updateStoredMessage(conversation, assistantId, (assistant) => ({
+          ...assistant,
+          content: tx("unableToStart", { message }),
+          status: "error",
+        })),
+      );
+    }
+  };
+
+  const runAutomation = useCallback(
+    async (automationId: string, automatic = false): Promise<boolean> => {
+      const automation = automations.find((item) => item.id === automationId);
+      if (!automation || automationOperations.current.has(automationId)) {
+        return false;
+      }
+      if (isStreaming) {
+        if (!automatic) {
+          setAutomationMessage(tx("automationGenerationBusy"));
+        }
+        return false;
+      }
+
+      const provider: ProviderConfig = {
+        base_url: settings.base_url.trim(),
+        model: settings.model.trim(),
+        api_key: settings.api_key.trim() || undefined,
+      };
+      const worker: ProviderConfig | undefined =
+        settings.worker_enabled && settings.worker_base_url.trim() && settings.worker_model.trim()
+          ? {
+              base_url: settings.worker_base_url.trim(),
+              model: settings.worker_model.trim(),
+              api_key: settings.worker_api_key.trim() || undefined,
+            }
+          : undefined;
+      if (!provider.base_url || !provider.model) {
+        if (!automatic) {
+          setAutomationMessage(tx("automationProviderRequired"));
+        }
+        return false;
+      }
+
+      const now = Date.now();
+      const conversationId = createId("conversation");
+      const userMessage: StoredMessage = {
+        id: createId("message"),
+        role: "user",
+        content: automation.prompt,
+        createdAt: now,
+      };
+      const assistantId = createId("message");
+      const assistantMessage: StoredMessage = {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        createdAt: now + 1,
+        status: "streaming",
+      };
+      const conversation: Conversation = {
+        id: conversationId,
+        title: tx("automationConversationTitle", { name: automation.name }),
+        messages: [userMessage, assistantMessage],
+        updatedAt: now,
+      };
+      const history: ChatMessage[] = [];
+      if (settings.system_prompt.trim()) {
+        history.push({ role: "system", content: settings.system_prompt.trim() });
+      }
+      history.push({ role: "user", content: automation.prompt });
+
+      setConversations((current) => [conversation, ...current]);
+      if (!automatic) {
+        setActiveConversationId(conversationId);
+        setView("chats");
+        setAutomationMessage(tx("automationRunStarted"));
+      }
+      setError(null);
+      markAutomationStarted(automationId, conversationId);
+
+      try {
+        const started = await startChat({
+          provider,
+          messages: history,
+          max_tokens: settings.max_tokens,
+          temperature: settings.temperature,
+          worker,
+          web_tools: settings.web_tools_enabled,
+        });
+        automationOperations.current.set(automationId, started.operation_id);
+        const binding: ChatBinding = {
+          conversationId,
+          assistantId,
+          automationId,
+        };
+        operationBindings.current.set(started.operation_id, binding);
+        setStreamingOperation(started.operation_id);
+        const pending = queuedEvents.current.get(started.operation_id) ?? [];
+        queuedEvents.current.delete(started.operation_id);
+        for (const event of pending) {
+          processBoundChatEvent(event, binding);
+        }
+        flushStreamDeltas();
+        return true;
+      } catch (startError) {
+        const message = errorMessage(startError);
+        automationOperations.current.delete(automationId);
+        markAutomationFinished(automationId, "error", message);
+        updateConversation(conversationId, (current) =>
+          updateStoredMessage(current, assistantId, (assistant) => ({
+            ...assistant,
+            content: tx("providerError", { message }),
+            status: "error",
+          })),
+        );
+        setAutomationMessage(tx("automationRunFailed", { message }));
+        return false;
+      }
+    },
+    [
+      automations,
+      flushStreamDeltas,
+      isStreaming,
+      markAutomationFinished,
+      markAutomationStarted,
+      processBoundChatEvent,
+      settings,
+      tx,
+      updateConversation,
+    ],
+  );
+
+  useEffect(() => {
+    const schedulerTimer = window.setInterval(() => {
+      if (isStreaming) {
+        return;
+      }
+      const now = Date.now();
+      const due = automations.find(
+        (automation) =>
+          automation.enabled &&
+          automation.lastStatus !== "running" &&
+          automation.nextRunAt !== null &&
+          automation.nextRunAt <= now &&
+          !automationOperations.current.has(automation.id),
+      );
+      if (due) {
+        void runAutomation(due.id, true);
+      }
+    }, 15_000);
+    return () => window.clearInterval(schedulerTimer);
+  }, [automations, isStreaming, runAutomation]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setDraft("");
+    void handleSend();
+  };
+
+  const handleComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      void handleSend();
+    }
   };
 
   const handleStop = async () => {
     setStopMessage(null);
     try {
+      if (streamingOperation) {
+        await cancelOperation(streamingOperation);
+      }
       const count = await stopEverything();
-      setStopMessage(count === 0 ? "No active operations." : `${count} operation(s) cancelled.`);
+      setStopMessage(
+        count === 0 ? tx("noActiveOperations") : tx("operationsCancelled", { count }),
+      );
     } catch {
-      setStopMessage("Desktop core is not connected.");
+      setStopMessage(tx("coreNotConnected"));
     }
   };
+
+  const handleCheckConnection = async () => {
+    setModelsLoading(true);
+    setConnectionMessage(null);
+    setProviderDiagnostics(null);
+    setModelOptions([]);
+    try {
+      const diagnostics = await inspectProvider({
+        base_url: settings.base_url.trim(),
+        model: settings.model.trim() || "default",
+        api_key: settings.api_key.trim() || undefined,
+      });
+      setProviderDiagnostics(diagnostics);
+      setModelOptions(diagnostics.models);
+      if (!diagnostics.error && !settings.model.trim() && diagnostics.models[0]) {
+        setSettings((current) => ({ ...current, model: diagnostics.models[0].id }));
+      }
+      setConnectionMessage(
+        diagnostics.error
+          ? diagnostics.error +
+            (diagnostics.retryable ? " · " + tx("retryable") : "")
+          : diagnostics.models.length === 0
+            ? tx("connectedNoModels")
+            : tx("modelsAvailable", { count: diagnostics.models.length }),
+      );
+    } catch (connectionError) {
+      setConnectionMessage(errorMessage(connectionError));
+    } finally {
+      setModelsLoading(false);
+    }
+  };
+
+  const handleCheckWorkerConnection = async () => {
+    setWorkerDiagnostics(null);
+    if (!settings.worker_base_url.trim()) {
+      return;
+    }
+    setWorkerLoading(true);
+    try {
+      const diagnostics = await inspectProvider({
+        base_url: settings.worker_base_url.trim(),
+        model: settings.worker_model.trim() || "default",
+        api_key: settings.worker_api_key.trim() || undefined,
+      });
+      setWorkerDiagnostics(diagnostics);
+    } catch (workerError) {
+      setWorkerDiagnostics({
+        status: "error",
+        endpoint: settings.worker_base_url.trim(),
+        local: settings.worker_base_url.trim().startsWith("http://127.0.0.1"),
+        latencyMs: 0,
+        modelCount: 0,
+        models: [],
+        error: errorMessage(workerError),
+        retryable: false,
+      });
+    } finally {
+      setWorkerLoading(false);
+    }
+  };
+
+  const handleBindProvider = async (model: ProviderModel, worker = false) => {
+    if (bindingModel || isStreaming) return;
+    const snapshot = {
+      base_url: (worker ? settings.worker_base_url : settings.base_url).trim(),
+      model: model.id,
+      api_key: (worker ? settings.worker_api_key : settings.api_key).trim() || undefined,
+    };
+    setBindingModel(model.id);
+    setConnectionMessage(tx("providerModelLoading", { model: model.display_name ?? model.id }));
+    try {
+      const id = model.load_via ? await loadProviderModel(snapshot, model.load_via) : model.id;
+      setSettings((current) => {
+        // A slow load must not replace a newer endpoint selected by the user.
+        if ((worker ? current.worker_base_url : current.base_url).trim() !== snapshot.base_url) return current;
+        return worker ? { ...current, worker_model: id } : { ...current, model: id };
+      });
+      setConnectionMessage(tx("providerModelReady", { model: id }));
+    } catch (loadError) {
+      setConnectionMessage(errorMessage(loadError));
+    } finally {
+      setBindingModel(null);
+    }
+  };
+
+  const handleBrowseModelLibrary = async () => {
+    try {
+      const path = await open({ directory: true, multiple: false, title: tx("browseModelFolder") });
+      if (typeof path === "string") await handleRegisterModelLibrary(path);
+    } catch (browseError) {
+      setModelLibraryMessage(errorMessage(browseError));
+    }
+  };
+
+  const applyModelScan = (summary: ModelScanSummary) => {
+    setModelLibraries((current) => [
+      summary.library,
+      ...current.filter((library) => library.id !== summary.library.id),
+    ]);
+    setLocalModels((current) => [
+      ...current.filter((model) => model.libraryId !== summary.library.id),
+      ...summary.models,
+    ]);
+    setModelScanSummary(summary);
+    setSelectedLocalModelId((current) =>
+      current && summary.models.some((model) => model.id === current)
+        ? current
+        : summary.models[0]?.id ?? null,
+    );
+  };
+
+  const applyModelDiscovery = (summary: ModelDiscoverySummary) => {
+    setModelLibraries(summary.libraries);
+    setLocalModels(summary.models);
+    setSelectedLocalModelId((current) =>
+      current && summary.models.some((model) => model.id === current)
+        ? current
+        : summary.models[0]?.id ?? null,
+    );
+    setModelScanSummary(null);
+  };
+
+  const handleDiscoverLocalModels = async () => {
+    if (autoDiscoveryBusy) {
+      return;
+    }
+    setAutoDiscoveryBusy(true);
+    setAutoDiscoveryMessage(null);
+    try {
+      const summary = await discoverLocalModels();
+      applyModelDiscovery(summary);
+      setAutoDiscoveryMessage(
+        tx("autoDiscoveryComplete", {
+          roots: summary.scannedRoots,
+          count: summary.models.length,
+          duration: summary.durationMs,
+        }) + (summary.issues.length > 0
+          ? " · " + tx("modelScanIssues", { count: summary.issues.length })
+          : ""),
+      );
+    } catch (discoveryError) {
+      setAutoDiscoveryMessage(errorMessage(discoveryError));
+    } finally {
+      setAutoDiscoveryBusy(false);
+    }
+  };
+
+  const handleRegisterModelLibrary = async (selectedPath?: string) => {
+    const path = (selectedPath ?? modelLibraryPath).trim();
+    if (!path) {
+      setModelLibraryMessage(tx("modelLibraryPathRequired"));
+      return;
+    }
+    setModelLibraryBusy(true);
+    setModelLibraryMessage(null);
+    try {
+      const diagnostics = await validateWorkspacePath(path);
+      setModelLibraryDiagnostics(diagnostics);
+      if (!diagnostics.exists || !diagnostics.isDirectory) {
+        setModelLibraryMessage(tx("modelLibraryPathInvalid"));
+        return;
+      }
+      const canonicalPath = diagnostics.canonicalPath ?? path;
+      const registered = modelLibraries.find((library) => library.rootPath === canonicalPath);
+      if (registered) {
+        applyModelScan(await scanModelLibrary(registered.id));
+        setModelLibraryMessage(tx("directoryReady"));
+        return;
+      }
+      const pathParts = canonicalPath.split(/[\\/]/).filter(Boolean);
+      const fallbackName = pathParts[pathParts.length - 1] ?? tx("modelLibraryDefaultName");
+      const now = Date.now();
+      const library: ModelLibrary = {
+        id: createId("model-library"),
+        name: (modelLibraryName.trim() || fallbackName).slice(0, 128),
+        rootPath: canonicalPath,
+        enabled: true,
+        lastScanAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await saveModelLibrary(library);
+      setModelLibraries((current) => [library, ...current]);
+      setModelLibraryName("");
+      setModelLibraryPath("");
+      const summary = await scanModelLibrary(library.id);
+      applyModelScan(summary);
+      setModelLibraryDiagnostics(null);
+      setModelLibraryMessage(
+        tx("modelScanComplete", {
+          count: summary.scannedCount,
+          duration: summary.durationMs,
+        }) + (summary.issues.length > 0
+          ? " " + tx("modelScanIssues", { count: summary.issues.length })
+          : ""),
+      );
+    } catch (scanError) {
+      setModelLibraryMessage(errorMessage(scanError));
+    } finally {
+      setModelLibraryBusy(false);
+    }
+  };
+
+  const handleScanModelLibrary = async (libraryId: string) => {
+    setModelLibraryBusy(true);
+    setModelLibraryMessage(null);
+    try {
+      const summary = await scanModelLibrary(libraryId);
+      applyModelScan(summary);
+      setModelLibraryMessage(
+        tx("modelScanComplete", {
+          count: summary.scannedCount,
+          duration: summary.durationMs,
+        }) + (summary.issues.length > 0
+          ? " " + tx("modelScanIssues", { count: summary.issues.length })
+          : ""),
+      );
+    } catch (scanError) {
+      setModelLibraryMessage(errorMessage(scanError));
+    } finally {
+      setModelLibraryBusy(false);
+    }
+  };
+
+  const handleDeleteModelLibrary = async (library: ModelLibrary) => {
+    if (!window.confirm(tx("deleteModelLibraryConfirm"))) {
+      return;
+    }
+    setModelLibraryBusy(true);
+    try {
+      await deleteModelLibrary(library.id);
+      setModelLibraries((current) => current.filter((item) => item.id !== library.id));
+      setLocalModels((current) => current.filter((model) => model.libraryId !== library.id));
+      setSelectedLocalModelId((current) => {
+        const removed = localModels.find(
+          (model) => model.id === current && model.libraryId === library.id,
+        );
+        return removed ? null : current;
+      });
+      if (modelScanSummary?.library.id === library.id) {
+        setModelScanSummary(null);
+      }
+    } catch (deleteError) {
+      setModelLibraryMessage(errorMessage(deleteError));
+    } finally {
+      setModelLibraryBusy(false);
+    }
+  };
+
+  const handleSaveModelProfile = async () => {
+    if (!selectedLocalModel || !loadEstimate) {
+      return;
+    }
+    const existing = modelProfiles.find(
+      (profile) =>
+        profile.modelId === selectedLocalModel.id && profile.preset === loadPreset,
+    );
+    const now = Date.now();
+    const profile: ModelProfile = {
+      id: existing?.id ?? createId("model-profile"),
+      name: selectedLocalModel.displayName + " · " + loadPreset,
+      preset: loadPreset,
+      modelId: selectedLocalModel.id,
+      configJson: JSON.stringify(loadEstimate.profile),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    try {
+      await saveModelProfile(profile);
+      setModelProfiles((current) => [
+        profile,
+        ...current.filter((item) => item.id !== profile.id),
+      ]);
+      setProfileMessage(tx("profileSaved"));
+    } catch (saveError) {
+      setProfileMessage(errorMessage(saveError));
+    }
+  };
+
+
+  const handleStartNativeModel = async () => {
+    if (!selectedLocalModel || !loadEstimate || nativeRuntimeBusy) {
+      return;
+    }
+    setNativeRuntimeBusy(true);
+    setNativeRuntimeMessage(null);
+    try {
+      const status = await startNativeModel({
+        modelId: selectedLocalModel.id,
+        preset: loadPreset,
+        runtimePath: nativeRuntimePath.trim() || undefined,
+      });
+      setNativeRuntime(status);
+      if (status.endpoint) {
+        setSettings((current) => ({
+          ...current,
+          base_url: status.endpoint!.replace(/\/+$/, "") + "/v1",
+          model: status.modelId ?? selectedLocalModel.id,
+          api_key: "",
+        }));
+        setModelOptions([]);
+        setProviderDiagnostics(null);
+        setConnectionMessage(null);
+      }
+      setNativeRuntimeMessage(tx("nativeModelReady"));
+    } catch (startError) {
+      setNativeRuntimeMessage(errorMessage(startError));
+    } finally {
+      setNativeRuntimeBusy(false);
+    }
+  };
+
+  const handleQuickBindModel = async (model: LocalModel) => {
+    if (nativeRuntimeBusy || isStreaming) {
+      return;
+    }
+    setSelectedLocalModelId(model.id);
+    setNativeRuntimeBusy(true);
+    setNativeRuntimeMessage(null);
+    try {
+      const estimate = await estimateModelLoad(model.id, loadPreset);
+      setLoadEstimate(estimate);
+      if (nativeRuntime.phase === "ready" && nativeRuntime.modelId !== model.id) {
+        setNativeRuntime(await stopNativeModel());
+        setSettings((current) => ({ ...current, model: "" }));
+      }
+      if (nativeRuntime.phase === "ready" && nativeRuntime.modelId === model.id && nativeRuntime.endpoint) {
+        setSettings((current) => ({ ...current, model: model.id, base_url: nativeRuntime.endpoint!.replace(/\/+$/, "") + "/v1", api_key: "" }));
+        setNativeRuntimeMessage(tx("nativeModelReady"));
+        return;
+      }
+      const status = await startNativeModel({
+        modelId: model.id,
+        preset: loadPreset,
+        runtimePath: nativeRuntimePath.trim() || undefined,
+      });
+      setNativeRuntime(status);
+      if (status.endpoint) {
+        setSettings((current) => ({
+          ...current,
+          base_url: status.endpoint!.replace(/\/+$/, "") + "/v1",
+          model: status.modelId ?? model.id,
+          api_key: "",
+        }));
+        setModelOptions([]);
+        setProviderDiagnostics(null);
+      }
+      setNativeRuntimeMessage(tx("nativeModelReady"));
+    } catch (bindError) {
+      setNativeRuntimeMessage(errorMessage(bindError));
+    } finally {
+      setNativeRuntimeBusy(false);
+    }
+  };
+
+  const handleStopNativeModel = async () => {
+    if (nativeRuntime.phase === "stopped" || nativeRuntime.phase === "stopping") {
+      return;
+    }
+    setNativeRuntimeBusy(true);
+    setNativeRuntimeMessage(null);
+    try {
+      const status = await stopNativeModel();
+      setNativeRuntime(status);
+      setNativeRuntimeMessage(tx("nativeRuntimeStopped"));
+    } catch (stopError) {
+      setNativeRuntimeMessage(errorMessage(stopError));
+    } finally {
+      setNativeRuntimeBusy(false);
+    }
+  };
+
+  const handleCopyMessage = async (message: StoredMessage) => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+      window.setTimeout(() => setCopiedMessageId(null), 1400);
+    } catch {
+      setError(tx("copyFailed"));
+    }
+  };
+
+  const handleDeleteConversation = (conversationId: string) => {
+    if (!window.confirm(tx("deleteConversationConfirm"))) {
+      return;
+    }
+    setConversations((current) => {
+      const next = current.filter((conversation) => conversation.id !== conversationId);
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(next[0]?.id ?? null);
+      }
+      return next;
+    });
+    void deletePersistedConversation(conversationId).catch(() => {
+      // Local storage remains the fallback when the native shell is unavailable.
+    });
+  };
+
+  const handleRenameConversation = () => {
+    if (!activeConversation) {
+      return;
+    }
+    const value = window.prompt(tx("renameConversationPrompt"), activeConversation.title);
+    if (value === null) {
+      return;
+    }
+    const title = value.trim().slice(0, 160);
+    if (!title) {
+      return;
+    }
+    updateConversation(activeConversation.id, (conversation) => ({
+      ...conversation,
+      title,
+      updatedAt: Date.now(),
+    }));
+  };
+
+  const handleExportConversation = () => {
+    if (!activeConversation || activeConversation.messages.length === 0) {
+      return;
+    }
+    const markdown = [
+      "# " + activeConversation.title,
+      "",
+      ...activeConversation.messages.flatMap((message) => [
+        "## " + (message.role === "user" ? tx("you") : tx("appName")),
+        "",
+        message.content,
+        message.reasoning
+          ? "\n> " + tx("reasoningTrace") + ": " + message.reasoning.replace(/\n/g, "\n> ")
+          : "",
+        "",
+      ]),
+    ].join("\n");
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = safeExportName(activeConversation.title) + ".md";
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
+  const handleValidateWorkspace = async () => {
+    setWorkspaceBusy(true);
+    setWorkspaceMessage(null);
+    try {
+      const diagnostics = await validateWorkspacePath(workspacePath.trim());
+      setWorkspaceDiagnostics(diagnostics);
+      setWorkspaceMessage(
+        diagnostics.exists && diagnostics.isDirectory
+          ? tx("workspacePathReady")
+          : tx("workspacePathInvalid"),
+      );
+    } catch {
+      setWorkspaceDiagnostics(null);
+      setWorkspaceMessage(tx("coreNotConnected"));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  const handleAddWorkspace = async () => {
+    const path = workspacePath.trim();
+    if (!path) {
+      setWorkspaceMessage(tx("workspacePathRequired"));
+      return;
+    }
+    setWorkspaceBusy(true);
+    setWorkspaceMessage(null);
+    try {
+      const diagnostics = await validateWorkspacePath(path);
+      setWorkspaceDiagnostics(diagnostics);
+      if (!diagnostics.exists || !diagnostics.isDirectory) {
+        setWorkspaceMessage(tx("workspacePathInvalid"));
+        return;
+      }
+      const canonicalPath = diagnostics.canonicalPath ?? path;
+      const pathParts = canonicalPath.split(/[\\/]/).filter(Boolean);
+      const fallbackName = pathParts[pathParts.length - 1] ?? tx("workspaceDefaultName");
+      const now = Date.now();
+      const workspace: Workspace = {
+        id: createId("workspace"),
+        name: (workspaceName.trim() || fallbackName).slice(0, 128),
+        rootPath: canonicalPath,
+        createdAt: now,
+        updatedAt: now,
+      };
+      setWorkspaces((current) => [
+        workspace,
+        ...current.filter((item) => item.rootPath !== workspace.rootPath),
+      ]);
+      void savePersistedWorkspace(workspace).catch(() => {
+        // The local fallback remains available in preview mode.
+      });
+      setWorkspaceName("");
+      setWorkspacePath("");
+      setWorkspaceDiagnostics(null);
+      setWorkspaceMessage(tx("workspaceAdded"));
+    } catch {
+      setWorkspaceMessage(tx("coreNotConnected"));
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  const handleDeleteWorkspace = (workspaceId: string) => {
+    if (!window.confirm(tx("deleteWorkspaceConfirm"))) {
+      return;
+    }
+    setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+    void deletePersistedWorkspace(workspaceId).catch(() => {
+      // Local storage remains the fallback when the native shell is unavailable.
+    });
+  };
+
+  const applyProviderPreset = (preset: "ollama" | "lmstudio") => {
+    setSettings((current) => ({
+      ...current,
+      base_url:
+        preset === "ollama"
+          ? "http://127.0.0.1:11434/v1"
+          : "http://127.0.0.1:1234/v1",
+      model: preset === "ollama" ? current.model || "llama3.2" : "",
+      api_key: "",
+    }));
+    setConnectionMessage(null);
+  };
+
+  const resetAutomationForm = () => {
+    setEditingAutomationId(null);
+    setAutomationName("");
+    setAutomationPrompt("");
+    setAutomationIntervalMinutes(60);
+    setAutomationEnabledOnCreate(false);
+  };
+
+  const handleEditAutomation = (automation: Automation) => {
+    if (automation.lastStatus === "running") {
+      return;
+    }
+    setEditingAutomationId(automation.id);
+    setAutomationName(automation.name);
+    setAutomationPrompt(automation.prompt);
+    setAutomationIntervalMinutes(automation.intervalMinutes);
+    setAutomationEnabledOnCreate(automation.enabled);
+    setAutomationMessage(null);
+    window.requestAnimationFrame(() => {
+      document.getElementById("automation-name")?.focus();
+    });
+  };
+
+  const handleCreateAutomation = async () => {
+    const name = automationName.trim().slice(0, 256);
+    const prompt = automationPrompt.trim();
+    const intervalMinutes = Math.floor(automationIntervalMinutes);
+    if (!name) {
+      setAutomationMessage(tx("automationNameRequired"));
+      return;
+    }
+    if (!prompt) {
+      setAutomationMessage(tx("automationPromptRequired"));
+      return;
+    }
+    if (prompt.length > 262_144) {
+      setAutomationMessage(tx("automationPromptTooLong"));
+      return;
+    }
+    if (intervalMinutes < 1 || intervalMinutes > 10_080) {
+      setAutomationMessage(tx("automationIntervalInvalid"));
+      return;
+    }
+
+    setAutomationBusy(true);
+    setAutomationMessage(null);
+    const now = Date.now();
+    const existing = editingAutomationId
+      ? automations.find((item) => item.id === editingAutomationId)
+      : undefined;
+    const automation: Automation = existing
+      ? {
+          ...existing,
+          name,
+          prompt,
+          intervalMinutes,
+          enabled: automationEnabledOnCreate,
+          nextRunAt: automationEnabledOnCreate
+            ? now + intervalMinutes * 60_000
+            : null,
+          updatedAt: now,
+        }
+      : {
+          id: createId("automation"),
+          name,
+          prompt,
+          intervalMinutes,
+          enabled: automationEnabledOnCreate,
+          lastRunAt: null,
+          nextRunAt: automationEnabledOnCreate
+            ? now + intervalMinutes * 60_000
+            : null,
+          lastStatus: "idle",
+          lastError: null,
+          lastConversationId: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+    try {
+      await saveAutomation(automation);
+      setAutomations((current) =>
+        existing
+          ? current.map((item) => (item.id === automation.id ? automation : item))
+          : [automation, ...current],
+      );
+      resetAutomationForm();
+      setAutomationMessage(
+        tx(existing ? "automationUpdated" : "automationCreated"),
+      );
+    } catch (saveError) {
+      setAutomationMessage(errorMessage(saveError));
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const handleToggleAutomation = async (automation: Automation) => {
+    if (automationBusy) {
+      return;
+    }
+    setAutomationBusy(true);
+    setAutomationMessage(null);
+    const enabled = !automation.enabled;
+    const now = Date.now();
+    const updated: Automation = {
+      ...automation,
+      enabled,
+      nextRunAt: enabled ? now + automation.intervalMinutes * 60_000 : null,
+      updatedAt: now,
+    };
+    try {
+      await saveAutomation(updated);
+      setAutomations((current) =>
+        current.map((item) => item.id === updated.id ? updated : item),
+      );
+      setAutomationMessage(tx("automationUpdated"));
+    } catch (saveError) {
+      setAutomationMessage(errorMessage(saveError));
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const handleDeleteAutomation = async (automation: Automation) => {
+    if (automation.lastStatus === "running") {
+      setAutomationMessage(tx("automationRunning"));
+      return;
+    }
+    if (!window.confirm(tx("automationDeleteConfirm"))) {
+      return;
+    }
+    setAutomationBusy(true);
+    setAutomationMessage(null);
+    try {
+      await deleteAutomation(automation.id);
+      setAutomations((current) =>
+        current.filter((item) => item.id !== automation.id),
+      );
+      if (editingAutomationId === automation.id) {
+        resetAutomationForm();
+      }
+      setAutomationMessage(tx("automationDeleted"));
+    } catch (deleteError) {
+      setAutomationMessage(errorMessage(deleteError));
+    } finally {
+      setAutomationBusy(false);
+    }
+  };
+
+  const handleOpenAutomationConversation = (automation: Automation) => {
+    if (!automation.lastConversationId) {
+      return;
+    }
+    if (!conversations.some((conversation) => conversation.id === automation.lastConversationId)) {
+      setAutomationMessage(tx("automationConversationMissing"));
+      return;
+    }
+    setActiveConversationId(automation.lastConversationId);
+    setView("chats");
+  };
+
+  const renderChat = () => {
+    if (activeMessages.length === 0) {
+      return (
+        <>
+          <section className="welcome-block">
+            <div className="welcome-orbit" aria-hidden="true">
+              <span className="orbit-dot orbit-dot-one" />
+              <span className="orbit-dot orbit-dot-two" />
+              <div className="orbit-core">A</div>
+            </div>
+            <div className="eyebrow">{tx("secureByConstruction")}</div>
+            <h2>{tx("welcomeTitle")}</h2>
+            <p>{tx("welcomeDescription")}</p>
+          </section>
+
+          <div className="starter-grid" aria-label={tx("starterPrompts")}>
+            <button className="starter-card" type="button" onClick={() => setView("workspaces")}>
+              <span className="starter-icon">⌁</span>
+              <span>
+                <strong>{tx("openProject")}</strong>
+                <small>{tx("openProjectDescription")}</small>
+              </span>
+            </button>
+            <button className="starter-card" type="button" onClick={() => setView("models")}>
+              <span className="starter-icon">◈</span>
+              <span>
+                <strong>{tx("loadLocalModel")}</strong>
+                <small>{tx("loadLocalModelDescription")}</small>
+              </span>
+            </button>
+            <button
+              className="starter-card"
+              type="button"
+              onClick={() => {
+                setDraft(tx("permissionPrompt"));
+                window.requestAnimationFrame(() => composerRef.current?.focus());
+              }}
+            >
+              <span className="starter-icon">✦</span>
+              <span>
+                <strong>{tx("reviewPermissions")}</strong>
+                <small>{tx("reviewPermissionsDescription")}</small>
+              </span>
+            </button>
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <section className="chat-panel" aria-live="polite">
+        {activeMessages.map((message) => (
+          <article
+            className={
+              "chat-message " +
+              (message.role === "user" ? "is-user " : "is-assistant ") +
+              (message.status ? "is-" + message.status : "")
+            }
+            key={message.id}
+          >
+            <div className="message-meta">
+              <span>{message.role === "user" ? tx("you") : tx("appName")}</span>
+              <time dateTime={new Date(message.createdAt).toISOString()}>
+                {new Date(message.createdAt).toLocaleTimeString(localeTag, {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </time>
+              {message.content && (
+                <button
+                  className="message-action"
+                  type="button"
+                  onClick={() => void handleCopyMessage(message)}
+                  aria-label={tx("copyMessage")}
+                  title={tx("copyMessage")}
+                >
+                  {copiedMessageId === message.id ? tx("copied") : tx("copy")}
+                </button>
+              )}
+            </div>
+            <div className="message-bubble">
+              {message.toolActivity && message.toolActivity.length > 0 && (
+                <ToolActivity items={message.toolActivity} locale={uiPreferences.locale} />
+              )}
+              {message.reasoning && (
+                <details className="reasoning-block" open={message.status === "streaming"}>
+                  <summary>{tx("reasoningTrace")}</summary>
+                  <div>{message.reasoning}</div>
+                </details>
+              )}
+              <div className="message-content">
+                {message.role === "assistant" && message.content
+                  ? <Suspense fallback={message.content}><MessageContent text={message.content} locale={uiPreferences.locale} /></Suspense>
+                  : message.content || (message.status === "streaming" ? "…" : "")}
+              </div>
+            </div>
+          </article>
+        ))}
+      </section>
+    );
+  };
+
+  const renderWorkspaces = () => (
+    <div className="workspaces-view">
+      <section className="settings-panel card workspace-form-card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">{tx("workspaceRegistry")}</div>
+            <h2>{tx("addWorkspaceTitle")}</h2>
+          </div>
+          <span className="pill pill-green">{tx("scopedAccess")}</span>
+        </div>
+        <p className="settings-intro">{tx("workspaceIntro")}</p>
+        <div className="workspace-form">
+          <label>
+            <span>{tx("workspaceName")}</span>
+            <input
+              value={workspaceName}
+              onChange={(event) => setWorkspaceName(event.target.value)}
+              placeholder={tx("workspaceNamePlaceholder")}
+              maxLength={128}
+            />
+          </label>
+          <label className="workspace-path-field">
+            <span>{tx("workspacePath")}</span>
+            <input
+              value={workspacePath}
+              onChange={(event) => {
+                setWorkspacePath(event.target.value);
+                setWorkspaceDiagnostics(null);
+                setWorkspaceMessage(null);
+              }}
+              placeholder={tx("workspacePathPlaceholder")}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+        </div>
+        <div className="settings-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => void handleValidateWorkspace()}
+            disabled={workspaceBusy || !workspacePath.trim()}
+          >
+            {workspaceBusy ? tx("checking") : tx("validatePath")}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void handleAddWorkspace()}
+            disabled={workspaceBusy || !workspacePath.trim()}
+          >
+            {tx("addWorkspace")}
+          </button>
+          {workspaceMessage && (
+            <span
+              className={
+                "connection-message " +
+                (workspaceDiagnostics?.exists && workspaceDiagnostics.isDirectory
+                  ? "is-success"
+                  : "")
+              }
+              role="status"
+            >
+              {workspaceMessage}
+            </span>
+          )}
+        </div>
+        {workspaceDiagnostics && (
+          <div
+            className={
+              "path-diagnostics " +
+              (workspaceDiagnostics.exists && workspaceDiagnostics.isDirectory
+                ? "is-valid"
+                : "is-invalid")
+            }
+          >
+            <span className="status-dot" />
+            <div>
+              <strong>
+                {workspaceDiagnostics.exists && workspaceDiagnostics.isDirectory
+                  ? tx("directoryReady")
+                  : tx("directoryUnavailable")}
+              </strong>
+              <small>
+                {workspaceDiagnostics.canonicalPath ??
+                  workspaceDiagnostics.error ??
+                  tx("directoryUnavailable")}
+              </small>
+            </div>
+          </div>
+        )}
+        <div className="provider-help workspace-boundary-note">
+          <strong>{tx("workspaceSafetyTitle")}</strong>
+          <span>{tx("workspaceSafetyDescription")}</span>
+        </div>
+      </section>
+
+      <section className="card workspace-list-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("registeredWorkspaces")}</span>
+            <small className="card-caption">{tx("workspaceCount", { count: workspaces.length })}</small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("storedLocally")}</span>
+        </div>
+        {workspaces.length === 0 ? (
+          <div className="workspace-empty">
+            <div className="empty-view-icon" aria-hidden="true">⌁</div>
+            <strong>{tx("noWorkspaces")}</strong>
+            <p>{tx("noWorkspacesDescription")}</p>
+          </div>
+        ) : (
+          <div className="workspace-list">
+            {workspaces.map((workspace) => (
+              <article className="workspace-row" key={workspace.id}>
+                <div className="workspace-row-icon" aria-hidden="true">⌁</div>
+                <div className="workspace-row-copy">
+                  <strong>{workspace.name}</strong>
+                  <code>{workspace.rootPath}</code>
+                  <small>
+                    {tx("workspaceAddedAt", {
+                      date: new Date(workspace.updatedAt).toLocaleDateString(localeTag),
+                    })}
+                  </small>
+                </div>
+                <button
+                  className="conversation-delete"
+                  type="button"
+                  onClick={() => handleDeleteWorkspace(workspace.id)}
+                  aria-label={tx("deleteWorkspace")}
+                  title={tx("deleteWorkspace")}
+                >
+                  ×
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+
+  const renderModels = () => (
+    <div className="models-view">
+      <section className="settings-panel card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">{tx("providerRouting")}</div>
+            <h2>{tx("connectModelTitle")}</h2>
+          </div>
+          <span className="pill pill-green">{tx("localFirst")}</span>
+        </div>
+        <p className="settings-intro">{tx("settingsIntro")}</p>
+
+        <div className="provider-presets" aria-label={tx("quickSetup")}>
+          <button type="button" onClick={() => applyProviderPreset("ollama")}>
+            <span className="preset-mark">O</span>
+            <span><strong>Ollama</strong><small>127.0.0.1:11434</small></span>
+          </button>
+          <button type="button" onClick={() => applyProviderPreset("lmstudio")}>
+            <span className="preset-mark">L</span>
+            <span><strong>LM Studio</strong><small>127.0.0.1:1234</small></span>
+          </button>
+        </div>
+
+        <div className="settings-grid">
+          <label>
+            <span>{tx("baseUrl")}</span>
+            <input
+              value={settings.base_url}
+              onChange={(event) =>
+                setSettings((current) => ({ ...current, base_url: event.target.value }))
+              }
+              placeholder="http://127.0.0.1:11434/v1"
+              spellCheck={false}
+            />
+          </label>
+          <label>
+            <span>{tx("model")}</span>
+            <input
+              list="provider-models"
+              value={settings.model}
+              onChange={(event) =>
+                setSettings((current) => ({ ...current, model: event.target.value }))
+              }
+              placeholder="llama3.2"
+              spellCheck={false}
+            />
+            <datalist id="provider-models">
+              {modelOptions.map((model) => <option key={model.id} value={model.id} />)}
+            </datalist>
+          </label>
+          <label>
+            <span>{tx("apiKey")} <em>{tx("optional")}</em></span>
+            <input
+              type="password"
+              value={settings.api_key}
+              onChange={(event) =>
+                setSettings((current) => ({ ...current, api_key: event.target.value }))
+              }
+              placeholder={tx("remoteProvidersOnly")}
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            <span>{tx("maxNewTokens")}</span>
+            <input
+              type="number"
+              min={1}
+              max={131072}
+              value={settings.max_tokens}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  max_tokens: Math.min(131072, Math.max(1, Number(event.target.value) || 1)),
+                }))
+              }
+            />
+          </label>
+          <label>
+            <span>{tx("temperature")}</span>
+            <input
+              type="number"
+              min={0}
+              max={2}
+              step={0.1}
+              value={settings.temperature}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  temperature: Math.min(2, Math.max(0, Number(event.target.value) || 0)),
+                }))
+              }
+            />
+          </label>
+          <label className="setting-wide">
+            <span>{tx("systemPrompt")} <em>{tx("optional")}</em></span>
+            <textarea
+              value={settings.system_prompt}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  system_prompt: event.target.value.slice(0, 16_384),
+                }))
+              }
+              placeholder={tx("systemPromptPlaceholder")}
+              rows={4}
+            />
+            <small>{tx("systemPromptHelp")}</small>
+          </label>
+        </div>
+        <div className="agent-capability-panel">
+          <div className="agent-capability-header">
+            <div>
+              <strong>{tx("agentCapabilities")}</strong>
+              <span>{tx("agentCapabilitiesDescription")}</span>
+            </div>
+            <span className="pill pill-blue">{tx("runtimeTools")}</span>
+          </div>
+          <label className="capability-toggle">
+            <input
+              type="checkbox"
+              checked={settings.web_tools_enabled}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  web_tools_enabled: event.target.checked,
+                }))
+              }
+            />
+            <span>
+              <strong>{tx("webTools")}</strong>
+              <small>{tx("webToolsDescription")}</small>
+            </span>
+          </label>
+          <label className="capability-toggle">
+            <input
+              type="checkbox"
+              checked={settings.worker_enabled}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  worker_enabled: event.target.checked,
+                }))
+              }
+            />
+            <span>
+              <strong>{tx("workerRouting")}</strong>
+              <small>{tx("workerRoutingDescription")}</small>
+            </span>
+          </label>
+          {settings.worker_enabled && (
+            <div className="worker-routing-grid">
+              <button type="button" className="secondary-button setting-wide" disabled={workerLoading || !!bindingModel}
+                onClick={() => {
+                  setSettings((current) => ({ ...current, worker_base_url: current.base_url, worker_api_key: current.api_key }));
+                  setWorkerDiagnostics(null);
+                }}>{tx("workerSameServer")}</button>
+              <label>
+                <span>{tx("workerBaseUrl")}</span>
+                <input
+                  value={settings.worker_base_url}
+                  onChange={(event) =>
+                    setSettings((current) => ({ ...current, worker_base_url: event.target.value }))
+                  }
+                  placeholder="http://127.0.0.1:1235/v1"
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                <span>{tx("workerModel")}</span>
+                <input
+                  value={settings.worker_model}
+                  onChange={(event) =>
+                    setSettings((current) => ({ ...current, worker_model: event.target.value }))
+                  }
+                  placeholder={tx("workerModelPlaceholder")}
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                <span>{tx("workerApiKey")} <em>{tx("optional")}</em></span>
+                <input
+                  type="password"
+                  value={settings.worker_api_key}
+                  onChange={(event) =>
+                    setSettings((current) => ({ ...current, worker_api_key: event.target.value }))
+                  }
+                  placeholder={tx("remoteProvidersOnly")}
+                  autoComplete="off"
+                />
+              </label>
+              <button
+                className="secondary-button worker-check-button"
+                type="button"
+                onClick={() => void handleCheckWorkerConnection()}
+                disabled={workerLoading || !!bindingModel || !settings.worker_base_url.trim()}
+              >
+                {workerLoading ? tx("checking") : tx("checkWorker")}
+              </button>
+              {workerDiagnostics && workerDiagnostics.models.length > 0 && (
+                <label className="setting-wide">
+                  <span>{tx("chooseWorkerModel")}</span>
+                  <select value={settings.worker_model} disabled={!!bindingModel || isStreaming}
+                    onChange={(event) => {
+                      const model = workerDiagnostics.models.find((item) => item.id === event.target.value);
+                      if (model) void handleBindProvider(model, true);
+                    }}>
+                    <option value="">{tx("noModelSelected")}</option>
+                    {workerDiagnostics.models.map((model) => <option key={model.id} value={model.id}>{model.display_name ?? model.id}</option>)}
+                  </select>
+                  <small>{tx("workerSelectionHelp")}</small>
+                </label>
+              )}
+            </div>
+          )}
+          {workerDiagnostics && (
+            <div className={"worker-health " + (workerDiagnostics.status === "connected" ? "is-ready" : "is-error")}>
+              <span className="status-dot" />
+              <span>{workerDiagnostics.status === "connected" ? tx("workerConnected") : tx("workerUnavailable")}</span>
+              <small>
+                {Math.round(workerDiagnostics.latencyMs)} ms · {tx("modelsAvailable", { count: workerDiagnostics.modelCount })}
+                {workerDiagnostics.error ? " · " + workerDiagnostics.error : ""}
+              </small>
+            </div>
+          )}
+        </div>
+        <div className="settings-actions">
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void handleCheckConnection()}
+            disabled={modelsLoading || !settings.base_url.trim()}
+          >
+            {modelsLoading ? tx("checking") : tx("checkConnection")}
+          </button>
+          {connectionMessage && (
+            <span className="connection-message" role="status">{connectionMessage}</span>
+          )}
+        </div>
+        <div className="provider-help">
+          <strong>{tx("privacyFirst")}</strong>
+          <span>{tx("providerHelp")}</span>
+        </div>
+      </section>
+
+      {providerDiagnostics && (
+        <section
+          className={
+            "provider-health card " +
+            (providerDiagnostics.status === "connected" ? "is-connected" : "is-error")
+          }
+        >
+          <div className="card-heading">
+            <div>
+              <span className="card-title">{tx("providerHealth")}</span>
+              <small className="card-caption">{providerDiagnostics.endpoint}</small>
+            </div>
+            <span className={"pill " + (providerDiagnostics.status === "connected" ? "pill-green" : "pill-red")}>
+              {providerDiagnostics.status === "connected" ? tx("connected") : tx("offline")}
+            </span>
+          </div>
+          <div className="health-stat-grid">
+            <div><strong>{Math.round(providerDiagnostics.latencyMs)} ms</strong><span>{tx("diagnosticLatency")}</span></div>
+            <div><strong>{providerDiagnostics.modelCount.toLocaleString(localeTag)}</strong><span>{tx("catalogModels")}</span></div>
+            <div><strong>{providerDiagnostics.local ? tx("localEndpoint") : tx("remoteEndpoint")}</strong><span>{tx("endpointClass")}</span></div>
+          </div>
+          {providerDiagnostics.error && (
+            <div className="runtime-error">
+              {providerDiagnostics.error}
+              {providerDiagnostics.retryable && <span> · {tx("retryable")}</span>}
+            </div>
+          )}
+        </section>
+      )}
+
+      <section className="model-catalog card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("availableModels")}</span>
+            <small className="card-caption">
+              {selectedProviderModel ? selectedProviderModel.id : tx("checkProviderForModels")}
+            </small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("providerCatalog")}</span>
+        </div>
+        {modelOptions.length === 0 ? (
+          <div className="catalog-empty">{tx("noProviderModels")}</div>
+        ) : (
+          <div className="model-catalog-grid">
+            {modelOptions.map((model) => (
+              <button
+                className={"model-catalog-item " + (settings.model === model.id ? "is-selected" : "")}
+                type="button"
+                key={model.id}
+                onClick={() => void handleBindProvider(model)}
+                disabled={!!bindingModel || isStreaming}
+                aria-busy={bindingModel === model.id}
+              >
+                <span className="model-catalog-icon" aria-hidden="true">◈</span>
+                <span className="model-catalog-copy">
+                  <strong>{model.display_name ?? model.id}</strong>
+                  <small>{model.owned_by ?? tx("providerReported")} · {bindingModel === model.id ? tx("loadingNativeModel") : model.loaded === false ? tx("modelOnDisk") : tx("selectProviderModel")}</small>
+                </span>
+                {settings.model === model.id && <span className="model-selected-mark">✓</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="model-library card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">{tx("localModelLibrary")}</div>
+            <h2>{tx("discoverLocalModels")}</h2>
+          </div>
+          <span className="pill pill-blue">{tx("metadataOnly")}</span>
+        </div>
+        <p className="settings-intro">{tx("modelLibraryIntro")}</p>
+        <div className="auto-discovery-strip">
+          <div>
+            <strong>{tx("zeroConfigDiscovery")}</strong>
+            <span>{tx("zeroConfigDiscoveryDescription")}</span>
+          </div>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => void handleDiscoverLocalModels()}
+            disabled={autoDiscoveryBusy || modelLibraryBusy}
+          >
+            {autoDiscoveryBusy ? tx("discovering") : tx("discoverNow")}
+          </button>
+        </div>
+        <button className="primary-button browse-model-button" type="button"
+          disabled={modelLibraryBusy || autoDiscoveryBusy} onClick={() => void handleBrowseModelLibrary()}>
+          {tx("browseModelFolder")}
+        </button>
+        {autoDiscoveryMessage && (
+          <div className="connection-message discovery-message" role="status">
+            {autoDiscoveryMessage}
+          </div>
+        )}
+        <div className="settings-grid">
+          <label>
+            <span>{tx("modelLibraryName")}</span>
+            <input
+              value={modelLibraryName}
+              onChange={(event) => setModelLibraryName(event.target.value)}
+              placeholder={tx("modelLibraryNamePlaceholder")}
+              maxLength={128}
+            />
+          </label>
+          <label>
+            <span>{tx("modelLibraryPath")}</span>
+            <input
+              value={modelLibraryPath}
+              onChange={(event) => {
+                setModelLibraryPath(event.target.value);
+                setModelLibraryDiagnostics(null);
+                setModelLibraryMessage(null);
+              }}
+              placeholder={tx("modelLibraryPathPlaceholder")}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+        </div>
+        <div className="settings-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => void (async () => {
+              if (!modelLibraryPath.trim()) {
+                setModelLibraryMessage(tx("modelLibraryPathRequired"));
+                return;
+              }
+              try {
+                const diagnostics = await validateWorkspacePath(modelLibraryPath.trim());
+                setModelLibraryDiagnostics(diagnostics);
+                setModelLibraryMessage(
+                  diagnostics.exists && diagnostics.isDirectory
+                    ? tx("directoryReady")
+                    : tx("modelLibraryPathInvalid"),
+                );
+              } catch (diagnosticError) {
+                setModelLibraryMessage(errorMessage(diagnosticError));
+              }
+            })()}
+            disabled={modelLibraryBusy || !modelLibraryPath.trim()}
+          >
+            {tx("validatePath")}
+          </button>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => void handleRegisterModelLibrary()}
+            disabled={modelLibraryBusy || !modelLibraryPath.trim()}
+          >
+            {modelLibraryBusy ? tx("scanning") : tx("registerAndScan")}
+          </button>
+          {modelLibraryMessage && (
+            <span className="connection-message" role="status">{modelLibraryMessage}</span>
+          )}
+        </div>
+        {modelLibraryDiagnostics && (
+          <div
+            className={
+              "path-diagnostics " +
+              (modelLibraryDiagnostics.exists && modelLibraryDiagnostics.isDirectory
+                ? "is-valid"
+                : "is-invalid")
+            }
+          >
+            <span className="status-dot" />
+            <div>
+              <strong>
+                {modelLibraryDiagnostics.exists && modelLibraryDiagnostics.isDirectory
+                  ? tx("directoryReady")
+                  : tx("directoryUnavailable")}
+              </strong>
+              <small>
+                {modelLibraryDiagnostics.canonicalPath ??
+                  modelLibraryDiagnostics.error ??
+                  tx("directoryUnavailable")}
+              </small>
+            </div>
+          </div>
+        )}
+        <div className="provider-help">
+          <strong>{tx("scannerSafetyTitle")}</strong>
+          <span>{tx("scannerSafetyDescription")}</span>
+        </div>
+      </section>
+
+      <section className="card model-library-list-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("registeredModelLibraries")}</span>
+            <small className="card-caption">
+              {tx("modelLibraryCount", { count: modelLibraries.length })}
+            </small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("storedLocally")}</span>
+        </div>
+        {modelLibraries.length === 0 ? (
+          <div className="catalog-empty">
+            <strong>{tx("noModelLibraries")}</strong>
+            <p>{tx("noModelLibrariesDescription")}</p>
+          </div>
+        ) : (
+          <div className="model-library-list">
+            {modelLibraries.map((library) => (
+              <article className="model-library-row" key={library.id}>
+                <div className="workspace-row-icon" aria-hidden="true">◈</div>
+                <div className="workspace-row-copy">
+                  <strong>{library.name}</strong>
+                  <code>{library.rootPath}</code>
+                  <small>
+                    {library.lastScanAt
+                      ? tx("lastScanned", {
+                          date: new Date(library.lastScanAt).toLocaleString(localeTag),
+                        })
+                      : tx("neverScanned")}
+                  </small>
+                </div>
+                <div className="model-library-row-actions">
+                  <button
+                    className="secondary-button compact-button"
+                    type="button"
+                    onClick={() => void handleScanModelLibrary(library.id)}
+                    disabled={modelLibraryBusy}
+                  >
+                    {tx("scanLibrary")}
+                  </button>
+                  <button
+                    className="conversation-delete"
+                    type="button"
+                    onClick={() => void handleDeleteModelLibrary(library)}
+                    disabled={modelLibraryBusy}
+                    aria-label={tx("deleteModelLibrary")}
+                    title={tx("deleteModelLibrary")}
+                  >
+                    ×
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="card local-inventory-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("localModelInventory")}</span>
+            <small className="card-caption">
+              {tx("localModelCount", { count: localModels.length })}
+              {modelScanSummary
+                ? " · " + tx("visitedFiles", { count: modelScanSummary.visitedFiles })
+                : ""}
+            </small>
+          </div>
+          <span className="metric-live"><span className="status-dot" /> {tx("metadataOnly")}</span>
+        </div>
+        {localModels.length > 0 && (
+          <div className="model-inventory-toolbar">
+            <label className="model-search-field">
+              <span aria-hidden="true">⌕</span>
+              <input
+                value={localModelQuery}
+                onChange={(event) => setLocalModelQuery(event.target.value)}
+                placeholder={tx("searchLocalModels")}
+                aria-label={tx("searchLocalModels")}
+                spellCheck={false}
+              />
+              {localModelQuery && (
+                <button
+                  className="model-search-clear"
+                  type="button"
+                  onClick={() => setLocalModelQuery("")}
+                  aria-label={tx("clearSearch")}
+                  title={tx("clearSearch")}
+                >
+                  ×
+                </button>
+              )}
+            </label>
+            <span className="model-search-count">
+              {visibleLocalModels.length}/{localModels.length}
+            </span>
+          </div>
+        )}
+        {localModels.length === 0 ? (
+          <div className="catalog-empty">
+            <strong>{tx("noLocalModels")}</strong>
+            <p>{tx("noLocalModelsDescription")}</p>
+          </div>
+        ) : visibleLocalModels.length === 0 ? (
+          <div className="catalog-empty">
+            <strong>{tx("noMatchingModels")}</strong>
+            <p>{tx("noMatchingModelsDescription")}</p>
+          </div>
+        ) : (
+          <div className="local-model-grid">
+            {visibleLocalModels.map((model) => (
+              <article
+                className={"local-model-card " + (selectedLocalModelId === model.id ? "is-selected" : "")}
+                key={model.id}
+              >
+                <button
+                  className="local-model-select"
+                  type="button"
+                  onClick={() => {
+                    setSelectedLocalModelId(model.id);
+                    setLoadEstimate(null);
+                    setProfileMessage(null);
+                  }}
+                >
+                  <span className="model-catalog-icon" aria-hidden="true">◈</span>
+                  <span className="local-model-title">
+                    <strong>{model.displayName}</strong>
+                    <small>{model.quantization ?? model.format.toUpperCase()}</small>
+                  </span>
+                  {selectedLocalModelId === model.id && (
+                    <span className="model-selected-mark">✓</span>
+                  )}
+                </button>
+                <div className="local-model-stats">
+                  <span>{tx("modelParameters", {
+                    count: model.parameterCount === null
+                      ? tx("unknownValue")
+                      : formatParameterCount(model.parameterCount, localeTag),
+                  })}</span>
+                  <span>{formatBytes(model.fileSizeBytes)}</span>
+                  <span>{model.architecture ?? "—"}</span>
+                  <span>
+                    {model.contextCapacity
+                      ? tx("modelContextValue", { count: model.contextCapacity })
+                      : tx("unknownValue")}
+                  </span>
+                </div>
+                <code className="local-model-path">{model.filePath}</code>
+                <div className="capability-row">
+                  {model.vision && <span>{tx("capabilityVision")}</span>}
+                  {model.toolCalling && <span>{tx("capabilityTools")}</span>}
+                  {model.reasoning && <span>{tx("capabilityReasoning")}</span>}
+                  {model.embeddings && <span>{tx("capabilityEmbeddings")}</span>}
+                  {!model.vision && !model.toolCalling && !model.reasoning && !model.embeddings && (
+                    <span className="muted">{tx("noCapabilities")}</span>
+                  )}
+                </div>
+                <button
+                  className="primary-button compact-button model-bind-button"
+                  type="button"
+                  onClick={() => void handleQuickBindModel(model)}
+                  disabled={
+                    autoDiscoveryBusy ||
+                    nativeRuntimeBusy ||
+                    nativeRuntime.phase === "starting" ||
+                    nativeRuntime.phase === "loading" ||
+                    isStreaming
+                  }
+                >
+                  {tx("oneClickBind")}
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+        {modelScanSummary && modelScanSummary.issues.length > 0 && (
+          <details className="model-scan-issues">
+            <summary>
+              {tx("modelScanIssues", { count: modelScanSummary.issues.length })}
+            </summary>
+            <ul>
+              {modelScanSummary.issues.slice(0, 12).map((issue) => (
+                <li key={issue.path + issue.message}>
+                  <code>{issue.path}</code>
+                  <span>{issue.message}</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </section>
+
+      {selectedLocalModel && (
+        <section className="card load-profile-card">
+          <div className="card-heading">
+            <div>
+              <span className="card-title">{tx("loadProfile")}</span>
+              <small className="card-caption">{selectedLocalModel.displayName}</small>
+            </div>
+            <span className="pill pill-blue">{tx("preflightValidated")}</span>
+          </div>
+          <p className="settings-intro">{tx("loadProfileDescription")}</p>
+          <div className="profile-controls">
+            <label>
+              <span>{tx("profilePreset")}</span>
+              <select
+                value={loadPreset}
+                onChange={(event) => {
+                  setLoadPreset(event.target.value as LoadPreset);
+                  setProfileMessage(null);
+                }}
+              >
+                <option value="eco">{tx("profileEco")}</option>
+                <option value="balanced">{tx("profileBalanced")}</option>
+                <option value="performance">{tx("profilePerformance")}</option>
+              </select>
+            </label>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleSaveModelProfile()}
+              disabled={!loadEstimate}
+            >
+              {tx("saveProfile")}
+            </button>
+            {profileMessage && <span className="connection-message" role="status">{profileMessage}</span>}
+          </div>
+          {loadEstimate ? (
+            <>
+              <div className="estimate-stat-grid">
+                <div><strong>{formatBytes(loadEstimate.estimate.weights_bytes)}</strong><span>{tx("estimateWeights")}</span></div>
+                <div><strong>{formatBytes(loadEstimate.estimate.kv_cache_bytes)}</strong><span>{tx("estimateKvCache")}</span></div>
+                <div><strong>{formatBytes(loadEstimate.estimate.estimated_vram_bytes)}</strong><span>{tx("estimateVram")}</span></div>
+                <div><strong>{formatBytes(loadEstimate.estimate.estimated_ram_bytes)}</strong><span>{tx("estimateRam")}</span></div>
+              </div>
+              <div className="estimate-assumptions">
+                <strong>{tx("estimateConfidence")}: {loadEstimate.estimate.confidence.toUpperCase()}</strong>
+                <ul>
+                  {loadEstimate.estimate.assumptions.map((assumption) => <li key={assumption}>{assumption}</li>)}
+                </ul>
+              </div>
+            </>
+          ) : (
+            <div className="catalog-empty">
+              {profileMessage ?? tx("estimateLoading")}
+            </div>
+          )}
+
+          <div className="native-runtime-panel">
+            <div className="native-runtime-heading">
+              <div>
+                <span className="card-title">{tx("nativeRuntime")}</span>
+                <small className="card-caption">{tx("nativeRuntimeDescription")}</small>
+              </div>
+              <span
+                className={
+                  "pill " +
+                  (nativeRuntime.phase === "ready"
+                    ? "pill-green"
+                    : nativeRuntime.phase === "error"
+                      ? "pill-red"
+                      : "pill-blue")
+                }
+              >
+                {tx(nativeRuntimePhaseKey(nativeRuntime.phase))}
+              </span>
+            </div>
+            <p className="settings-intro">{tx("nativeRuntimeDescription")}</p>
+            <label className="native-runtime-path-field">
+              <span>{tx("nativeRuntimePath")}</span>
+              <input
+                value={nativeRuntimePath}
+                onChange={(event) => setNativeRuntimePath(event.target.value.slice(0, 4096))}
+                placeholder={tx("nativeRuntimePathPlaceholder")}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={
+                  nativeRuntimeBusy ||
+                  nativeRuntime.phase === "starting" ||
+                  nativeRuntime.phase === "loading" ||
+                  nativeRuntime.phase === "ready"
+                }
+              />
+            </label>
+            <div className="native-runtime-actions">
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void handleStartNativeModel()}
+                disabled={
+                  !loadEstimate ||
+                  nativeRuntimeBusy ||
+                  nativeRuntime.phase === "starting" ||
+                  nativeRuntime.phase === "loading" ||
+                  nativeRuntime.phase === "ready"
+                }
+              >
+                {nativeRuntimeBusy &&
+                (nativeRuntime.phase === "starting" || nativeRuntime.phase === "loading")
+                  ? tx("loadingNativeModel")
+                  : tx("loadNativeModel")}
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => void handleStopNativeModel()}
+                disabled={
+                  nativeRuntime.phase === "stopped" ||
+                  nativeRuntime.phase === "stopping"
+                }
+              >
+                {tx("unloadNativeModel")}
+              </button>
+              <span className="native-runtime-phase" role="status">
+                <span
+                  className={
+                    "status-dot " +
+                    (nativeRuntime.phase === "ready"
+                      ? "is-ready"
+                      : nativeRuntime.phase === "error"
+                        ? "is-error"
+                        : "")
+                  }
+                />
+                {tx(nativeRuntimePhaseKey(nativeRuntime.phase))}
+              </span>
+            </div>
+            {nativeRuntime.endpoint && (
+              <div className="native-runtime-detail">
+                <span>{tx("nativeRuntimeEndpoint")}</span>
+                <code>{nativeRuntime.endpoint}/v1</code>
+              </div>
+            )}
+            {nativeRuntime.executablePath && (
+              <div className="native-runtime-detail">
+                <span>{tx("nativeRuntimeExecutable")}</span>
+                <code>{nativeRuntime.executablePath}</code>
+              </div>
+            )}
+            {nativeRuntime.metrics && (
+              <div className="native-runtime-metrics" aria-live="polite">
+                <div className="native-runtime-metrics-heading">
+                  <strong>{tx("nativeRuntimeMetrics")}</strong>
+                  <small>{tx("nativeRuntimeMetricsDescription")}</small>
+                </div>
+                <div className="native-runtime-metric-grid">
+                  <div>
+                    <strong>
+                      {formatMetricRate(
+                        nativeRuntime.metrics.predictedTokensPerSecond,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeGenerationRate")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricRate(
+                        nativeRuntime.metrics.promptTokensPerSecond,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativePromptRate")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.predictedTokensTotal,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeGeneratedTokens")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.promptTokensTotal,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativePromptTokens")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.requestsProcessing,
+                        localeTag,
+                      )}{" / "}
+                      {formatMetricCount(
+                        nativeRuntime.metrics.requestsDeferred,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeRuntimeQueue")}</span>
+                  </div>
+                  <div>
+                    <strong>
+                      {formatMetricCount(
+                        nativeRuntime.metrics.contextTokensMax,
+                        localeTag,
+                      )}
+                    </strong>
+                    <span>{tx("nativeContextHighWatermark")}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+            {(nativeRuntimeMessage || nativeRuntime.message) && (
+              <div
+                className={
+                  "runtime-error " +
+                  (nativeRuntime.phase === "ready" ? "native-runtime-success" : "")
+                }
+              >
+                {nativeRuntimeMessage ?? nativeRuntime.message}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+  const renderAutomations = () => (
+    <div className="automations-view">
+      <section className="card automation-form-card">
+        <div className="settings-heading">
+          <div>
+            <div className="eyebrow">
+              {editingAutomationId
+                ? tx("automationEdit")
+                : tx("automationCenter")}
+            </div>
+            <h2>{tx("automationTitle")}</h2>
+          </div>
+          <span className="pill pill-blue">{tx("automationAppOpen")}</span>
+        </div>
+        <p className="settings-intro">{tx("automationDescription")}</p>
+        <form
+          className="automation-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void handleCreateAutomation();
+          }}
+        >
+          <div className="settings-grid automation-form-grid">
+            <label>
+              <span>{tx("automationName")}</span>
+              <input
+                id="automation-name"
+                value={automationName}
+                onChange={(event) => setAutomationName(event.target.value)}
+                placeholder={tx("automationNamePlaceholder")}
+                maxLength={256}
+              />
+            </label>
+            <label>
+              <span>{tx("automationInterval")}</span>
+              <input
+                type="number"
+                min={1}
+                max={10080}
+                value={automationIntervalMinutes}
+                onChange={(event) =>
+                  setAutomationIntervalMinutes(Number(event.target.value) || 1)
+                }
+              />
+              <small>{tx("automationIntervalHelp")}</small>
+            </label>
+            <label className="setting-wide">
+              <span>{tx("automationPrompt")}</span>
+              <textarea
+                value={automationPrompt}
+                onChange={(event) => setAutomationPrompt(event.target.value)}
+                placeholder={tx("automationPromptPlaceholder")}
+                rows={5}
+                maxLength={262144}
+              />
+              <small>{automationPrompt.length.toLocaleString(localeTag)} / 262,144</small>
+            </label>
+          </div>
+          <label className="automation-enable-field">
+            <input
+              type="checkbox"
+              checked={automationEnabledOnCreate}
+              onChange={(event) => setAutomationEnabledOnCreate(event.target.checked)}
+            />
+            <span>
+              <strong>{tx("automationEnableOnCreate")}</strong>
+              <small>{tx("automationEnableOnCreateHelp")}</small>
+            </span>
+          </label>
+          <div className="settings-actions">
+            <button className="primary-button" type="submit" disabled={automationBusy}>
+              {editingAutomationId
+                ? tx("automationSaveChanges")
+                : tx("automationCreate")}
+            </button>
+            {editingAutomationId && (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={resetAutomationForm}
+                disabled={automationBusy}
+              >
+                {tx("automationCancelEdit")}
+              </button>
+            )}
+            {automationMessage && (
+              <span className="connection-message" role="status">{automationMessage}</span>
+            )}
+          </div>
+        </form>
+        <div className="provider-help automation-boundary-note">
+          <strong>{tx("automationBoundaryTitle")}</strong>
+          <span>{tx("automationBoundaryDescription")}</span>
+          <span>{tx("automationBoundaryHint")}</span>
+        </div>
+      </section>
+
+      <section className="card automation-list-card">
+        <div className="card-heading">
+          <div>
+            <span className="card-title">{tx("automationSchedule")}</span>
+            <small className="card-caption">
+              {tx("automationCount", { count: automations.length })}
+            </small>
+          </div>
+          <span className="metric-live">
+            <span className="status-dot" /> {tx("automationStored")}
+          </span>
+        </div>
+        {automations.length === 0 ? (
+          <div className="catalog-empty automation-empty">
+            <strong>{tx("automationNoItems")}</strong>
+            <p>{tx("automationNoItemsDescription")}</p>
+          </div>
+        ) : (
+          <div className="automation-list">
+            {automations.map((automation) => {
+              const running = automation.lastStatus === "running";
+              const statusClass =
+                automation.lastStatus === "success"
+                  ? "pill-green"
+                  : automation.lastStatus === "error"
+                    ? "pill-red"
+                    : automation.lastStatus === "running"
+                      ? "pill-blue"
+                      : "pill-muted";
+              return (
+                <article
+                  className={"automation-row " + (running ? "is-running" : "")}
+                  key={automation.id}
+                >
+                  <div className="automation-row-header">
+                    <div className="automation-icon" aria-hidden="true">◷</div>
+                    <div className="automation-row-title">
+                      <strong>{automation.name}</strong>
+                      <span className={"pill " + statusClass}>
+                        {tx(automationStatusKey(automation.lastStatus))}
+                      </span>
+                    </div>
+                    <span className={"automation-enabled-state " + (automation.enabled ? "is-enabled" : "")}>
+                      {automation.enabled ? tx("automationEnabled") : tx("automationPaused")}
+                    </span>
+                  </div>
+                  <p className="automation-prompt">{automation.prompt}</p>
+                  <div className="automation-meta">
+                    <span>
+                      {tx("automationEvery", {
+                        count: automation.intervalMinutes,
+                      })}
+                    </span>
+                    <span>
+                      {automation.lastRunAt
+                        ? tx("automationLastRun", {
+                            date: new Date(automation.lastRunAt).toLocaleString(localeTag),
+                          })
+                        : tx("automationNeverRun")}
+                    </span>
+                    <span>
+                      {automation.enabled && automation.nextRunAt
+                        ? tx("automationNextRun", {
+                            date: new Date(automation.nextRunAt).toLocaleString(localeTag),
+                          })
+                        : tx("automationPaused")}
+                    </span>
+                  </div>
+                  {automation.lastError && (
+                    <div className="runtime-error automation-error">
+                      {automation.lastError}
+                    </div>
+                  )}
+                  <div className="automation-row-actions">
+                    <button
+                      className="secondary-button compact-button"
+                      type="button"
+                      onClick={() => handleEditAutomation(automation)}
+                      disabled={automationBusy || running}
+                    >
+                      {tx("automationEdit")}
+                    </button>
+                    <button
+                      className="primary-button compact-button"
+                      type="button"
+                      onClick={() => void runAutomation(automation.id)}
+                      disabled={automationBusy || running || isStreaming}
+                    >
+                      {running ? tx("automationRunning") : tx("automationRunNow")}
+                    </button>
+                    <button
+                      className="secondary-button compact-button"
+                      type="button"
+                      onClick={() => void handleToggleAutomation(automation)}
+                      disabled={automationBusy || running}
+                    >
+                      {automation.enabled ? tx("automationDisable") : tx("automationEnable")}
+                    </button>
+                    {automation.lastConversationId && (
+                      <button
+                        className="secondary-button compact-button"
+                        type="button"
+                        onClick={() => handleOpenAutomationConversation(automation)}
+                      >
+                        {tx("automationOpenConversation")}
+                      </button>
+                    )}
+                    <button
+                      className="conversation-delete automation-delete"
+                      type="button"
+                      onClick={() => void handleDeleteAutomation(automation)}
+                      disabled={automationBusy || running}
+                      aria-label={tx("automationDelete")}
+                      title={tx("automationDelete")}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+
 
   return (
     <div className="app-shell">
@@ -55,56 +3477,137 @@ function App() {
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">A</div>
           <div>
-            <div className="brand-name">Aegis AI</div>
-            <div className="brand-subtitle">local work environment</div>
+            <div className="brand-name">{tx("appName")}</div>
+            <div className="brand-subtitle">{tx("brandSubtitle")}</div>
           </div>
         </div>
+
         <div className="topbar-status">
-          <span className={`status-dot ${runtime.core_state === "ready" ? "is-ready" : ""}`} />
-          <span>{runtime.core_state === "ready" ? "Core ready" : "Core unavailable"}</span>
+          <span className={"status-dot " + (coreReady ? "is-ready" : "")} />
+          <span>{coreReady ? tx("coreReady") : tx("coreUnavailable")}</span>
           <span className="topbar-divider" />
           <span className="muted">v{runtime.app_version}</span>
         </div>
-        <button className="avatar-button" type="button" aria-label="Profile settings (coming soon)" disabled>U</button>
+
+        <div className="topbar-preferences">
+          <label className="compact-select">
+            <span>{tx("language")}</span>
+            <select
+              value={uiPreferences.locale}
+              onChange={(event) =>
+                setUiPreferences((current) => ({
+                  ...current,
+                  locale: event.target.value as Locale,
+                }))
+              }
+            >
+              <option value="tr">Türkçe</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label className="compact-select">
+            <span>{tx("theme")}</span>
+            <select
+              value={uiPreferences.theme}
+              onChange={(event) =>
+                setUiPreferences((current) => ({
+                  ...current,
+                  theme: event.target.value as Theme,
+                }))
+              }
+            >
+              <option value="system">{tx("themeSystem")}</option>
+              <option value="dark">{tx("themeDark")}</option>
+              <option value="light">{tx("themeLight")}</option>
+            </select>
+          </label>
+        </div>
       </header>
 
       <div className="workspace-grid">
         <aside className="sidebar panel-divider-right">
           <div className="sidebar-actions">
-            <button className="new-chat-button" type="button" onClick={() => setView("chats")}>
-              <span aria-hidden="true">+</span>
-              <span>New chat</span>
-              <kbd>Ctrl K</kbd>
+            <button className="new-chat-button" type="button" onClick={handleNewChat}>
+              <span aria-hidden="true">＋</span>
+              <span>{tx("newChat")}</span>
+              <kbd>Ctrl N</kbd>
             </button>
           </div>
 
-          <nav className="primary-nav" aria-label="Primary navigation">
+          <nav className="primary-nav" aria-label={tx("primaryNavigation")}>
             {navigation.map((item) => (
               <button
-                className={`nav-item ${view === item.id ? "is-active" : ""}`}
+                className={"nav-item " + (view === item.id ? "is-active" : "")}
                 key={item.id}
                 type="button"
                 onClick={() => setView(item.id)}
               >
                 <span className="nav-glyph" aria-hidden="true">{item.glyph}</span>
-                <span>{item.label}</span>
+                <span>{tx(item.labelKey)}</span>
               </button>
             ))}
           </nav>
 
-          <div className="sidebar-section">
-            <div className="section-label">Recent chats</div>
-            <div className="empty-sidebar-state">No conversations yet</div>
+          <div className="sidebar-section recent-section">
+            <div className="section-label-row">
+              <div className="section-label">{tx("recentChats")}</div>
+              <kbd>Ctrl K</kbd>
+            </div>
+            <label className="conversation-search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                ref={conversationSearchRef}
+                value={conversationQuery}
+                onChange={(event) => setConversationQuery(event.target.value)}
+                placeholder={tx("searchChats")}
+                aria-label={tx("searchChats")}
+              />
+            </label>
+            {conversations.length === 0 ? (
+              <div className="empty-sidebar-state">{tx("noConversations")}</div>
+            ) : visibleConversations.length === 0 ? (
+              <div className="empty-sidebar-state">{tx("noSearchResults")}</div>
+            ) : (
+              <div className="conversation-list">
+                {visibleConversations.slice(0, 12).map((conversation) => (
+                  <div className="conversation-row" key={conversation.id}>
+                    <button
+                      className={
+                        "conversation-item " +
+                        (conversation.id === activeConversationId ? "is-active" : "")
+                      }
+                      type="button"
+                      onClick={() => {
+                        setActiveConversationId(conversation.id);
+                        setView("chats");
+                      }}
+                    >
+                      <span>{conversation.title}</span>
+                      <small>{tx("messageCount", { count: conversation.messages.length })}</small>
+                    </button>
+                    <button
+                      className="conversation-delete"
+                      type="button"
+                      onClick={() => handleDeleteConversation(conversation.id)}
+                      aria-label={tx("deleteConversation")}
+                      title={tx("deleteConversation")}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="sidebar-section sidebar-bottom">
-            <button className="secondary-nav-item" type="button" disabled>
+            <button className="secondary-nav-item" type="button" onClick={() => setView("models")}>
               <span aria-hidden="true">⚙</span>
-              <span>Settings</span>
+              <span>{tx("settings")}</span>
             </button>
-            <button className="secondary-nav-item" type="button" disabled>
+            <button className="secondary-nav-item" type="button" onClick={() => void refreshRuntime()}>
               <span aria-hidden="true">?</span>
-              <span>Diagnostics</span>
+              <span>{tx("diagnostics")}</span>
             </button>
           </div>
         </aside>
@@ -112,143 +3615,229 @@ function App() {
         <main className="main-panel">
           <div className="content-toolbar">
             <div>
-              <div className="eyebrow">Workspace</div>
+              <div className="eyebrow">{tx("workspace")}</div>
               <h1>{viewTitle}</h1>
+              {view === "chats" && activeConversation && (
+                <div className="toolbar-subtitle">{activeConversation.title}</div>
+              )}
             </div>
             <div className="toolbar-actions">
-              <button className="icon-button" type="button" aria-label="Search (coming soon)" title="Search (coming soon)" disabled>⌕</button>
-              <button className="icon-button" type="button" aria-label="More options (coming soon)" title="More options (coming soon)" disabled>•••</button>
+              {view === "chats" && activeConversation && (
+                <>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label={tx("renameConversation")}
+                    title={tx("renameConversation")}
+                    onClick={handleRenameConversation}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label={tx("exportConversation")}
+                    title={tx("exportConversation")}
+                    onClick={handleExportConversation}
+                    disabled={activeMessages.length === 0}
+                  >
+                    ⇩
+                  </button>
+                </>
+              )}
+              <span className="model-chip" title={settings.base_url}>
+                <span className={"status-dot " + (coreReady ? "is-ready" : "")} />
+                {settings.model || tx("noModelSelected")}
+              </span>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label={tx("openModelSettings")}
+                title={tx("openModelSettings")}
+                onClick={() => setView("models")}
+              >
+                ◈
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label={tx("refreshRuntime")}
+                title={tx("refreshRuntime")}
+                onClick={() => void refreshRuntime()}
+              >
+                ↻
+              </button>
             </div>
           </div>
 
-          {view === "chats" ? (
+          {view === "chats" && renderChat()}
+          {view === "workspaces" && renderWorkspaces()}
+          {view === "models" && renderModels()}
+          {view === "automations" && renderAutomations()}
+
+          {view === "chats" && (
             <>
-              <section className="welcome-block">
-                <div className="welcome-orbit" aria-hidden="true">
-                  <span className="orbit-dot orbit-dot-one" />
-                  <span className="orbit-dot orbit-dot-two" />
-                  <div className="orbit-core">A</div>
-                </div>
-                <div className="eyebrow">Secure by construction</div>
-                <h2>What are you working on?</h2>
-                <p>
-                  Aegis keeps models, agents and tools separate. No computer action can run
-                  without a native permission decision.
-                </p>
-              </section>
-
-              <div className="starter-grid" aria-label="Starter prompts">
-                <button className="starter-card" type="button" disabled>
-                  <span className="starter-icon">⌁</span>
-                  <span>
-                    <strong>Open a project</strong>
-                    <small>Connect a workspace in the next milestone</small>
-                  </span>
-                </button>
-                <button className="starter-card" type="button" disabled>
-                  <span className="starter-icon">◈</span>
-                  <span>
-                    <strong>Load a local model</strong>
-                    <small>GGUF and Vulkan runtime coming next</small>
-                  </span>
-                </button>
-                <button className="starter-card" type="button" disabled>
-                  <span className="starter-icon">✦</span>
-                  <span>
-                    <strong>Review permissions</strong>
-                    <small>Tool approval surface is being wired</small>
-                  </span>
-                </button>
-              </div>
-
+              {error && <div className="error-banner" role="alert">{error}</div>}
               <form className="composer-wrap" onSubmit={handleSubmit}>
+                <div className="composer-capabilities">
+                  <button type="button" aria-pressed={settings.web_tools_enabled} disabled={isStreaming}
+                    onClick={() => setSettings((current) => ({ ...current, web_tools_enabled: !current.web_tools_enabled }))}>
+                    {tx("webTools")}
+                  </button>
+                  <button type="button" aria-pressed={settings.worker_enabled} disabled={isStreaming}
+                    onClick={() => settings.worker_model.trim()
+                      ? setSettings((current) => ({ ...current, worker_enabled: !current.worker_enabled }))
+                      : setView("models")}>
+                    {tx("workerModel")}{settings.worker_enabled && settings.worker_model ? " · " + settings.worker_model : ""}
+                  </button>
+                </div>
                 <textarea
-                  aria-label="Message composer"
+                  ref={composerRef}
+                  aria-label={tx("messageComposer")}
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Ask Aegis anything…"
+                  onKeyDown={handleComposerKeyDown}
+                  placeholder={tx("askPlaceholder")}
                   rows={3}
-                  disabled
+                  maxLength={262144}
+                  disabled={isStreaming}
                 />
                 <div className="composer-footer">
                   <div className="composer-hint">
                     <span className="lock-icon" aria-hidden="true">⌑</span>
-                    Inference worker not connected
+                    {isStreaming
+                      ? tx("generatingFrom", { model: settings.model || tx("selectedModel") })
+                      : tx("modelEndpoint", {
+                          model: settings.model || tx("noModelSelected"),
+                          endpoint: settings.base_url,
+                        })}
                   </div>
-                  <button className="send-button" type="submit" disabled={!draft.trim()} aria-label="Send message">
-                    ↑
-                  </button>
+                  <span className="composer-count">{draft.length.toLocaleString(localeTag)}</span>
+                  {isStreaming ? (
+                    <button
+                      className="send-button cancel-button"
+                      type="button"
+                      onClick={() => void handleStop()}
+                      aria-label={tx("cancelGeneration")}
+                      title={tx("cancelGeneration")}
+                    >
+                      ■
+                    </button>
+                  ) : (
+                    <button
+                      className="send-button"
+                      type="submit"
+                      disabled={!draft.trim() || !settings.model.trim()}
+                      aria-label={tx("sendMessage")}
+                      title={tx("sendMessage")}
+                    >
+                      ↑
+                    </button>
+                  )}
                 </div>
               </form>
             </>
-          ) : (
-            <section className="empty-view">
-              <div className="empty-view-icon" aria-hidden="true">{navigation.find((item) => item.id === view)?.glyph}</div>
-              <h2>{viewTitle}</h2>
-              <p>This surface is reserved for its milestone implementation. No placeholder data is shown.</p>
-            </section>
           )}
         </main>
 
         <aside className="inspector panel-divider-left">
           <div className="inspector-heading">
             <div>
-              <div className="eyebrow">Live status</div>
-              <h2>Runtime</h2>
+              <div className="eyebrow">{tx("liveStatus")}</div>
+              <h2>{tx("runtime")}</h2>
             </div>
-            <button className="refresh-button" type="button" onClick={() => void refreshRuntime()} aria-label="Refresh runtime status">↻</button>
+            <button
+              className="refresh-button"
+              type="button"
+              onClick={() => void refreshRuntime()}
+              aria-label={tx("refreshRuntimeStatus")}
+            >
+              ↻
+            </button>
           </div>
 
           <section className="runtime-card card">
             <div className="card-heading">
-              <span className="card-title">Inference</span>
-              <span className={`pill ${runtime.core_state === "ready" ? "pill-green" : "pill-muted"}`}>
-                {runtime.core_state === "ready" ? "READY" : "OFFLINE"}
+              <span className="card-title">{tx("inference")}</span>
+              <span className={"pill " + (coreReady ? "pill-green" : "pill-muted")}>
+                {coreReady ? tx("coreReadyUpper") : tx("offline")}
               </span>
             </div>
-            <div className="runtime-model">{runtime.model_name ?? "No model loaded"}</div>
-            <div className="runtime-detail">{runtime.backend_name ?? "Backend not selected"}</div>
-            {runtime.last_error && <div className="runtime-error">{runtime.last_error}</div>}
+            <div className="runtime-model">{settings.model || tx("noModelSelected")}</div>
+            <div className="runtime-detail">
+              {runtime.backend_name ?? tx("openAiCompatibleProvider")}
+            </div>
+            {providerDiagnostics && (
+              <div className={"runtime-provider-status " + (providerDiagnostics.status === "connected" ? "is-connected" : "is-error")}>
+                <span className="status-dot" />
+                <span>
+                  {providerDiagnostics.status === "connected"
+                    ? tx("providerConnected")
+                    : tx("providerUnreachable")}
+                </span>
+                <small>{Math.round(providerDiagnostics.latencyMs)} ms</small>
+              </div>
+            )}
+            {runtime.last_error && !coreReady && (
+              <div className="runtime-error">{runtime.last_error}</div>
+            )}
           </section>
 
           <section className="metrics-card card">
             <div className="card-heading">
-              <span className="card-title">Hardware</span>
-              <span className="metric-live"><span className="status-dot" /> telemetry</span>
+              <span className="card-title">{tx("hardware")}</span>
+              <span className="metric-live"><span className="status-dot" /> {tx("telemetry")}</span>
             </div>
             <dl className="metric-list">
-              <div><dt>Accelerator</dt><dd>{runtime.accelerator ?? "—"}</dd></div>
-              <div><dt>GPU</dt><dd>{runtime.gpu_name ?? "—"}</dd></div>
-              <div><dt>VRAM</dt><dd>{formatBytes(runtime.vram_bytes)}</dd></div>
-              <div><dt>Context</dt><dd>{runtime.context_length ? `${runtime.context_length.toLocaleString()} tokens` : "—"}</dd></div>
-              <div><dt>Generation</dt><dd>{runtime.tokens_per_second ? `${runtime.tokens_per_second.toFixed(1)} tok/s` : "—"}</dd></div>
+              <div><dt>{tx("accelerator")}</dt><dd>{runtime.accelerator ?? "—"}</dd></div>
+              <div><dt>{tx("gpu")}</dt><dd>{runtime.gpu_name ?? "—"}</dd></div>
+              <div><dt>{tx("vram")}</dt><dd>{formatBytes(runtime.vram_bytes)}</dd></div>
+              <div>
+                <dt>{tx("context")}</dt>
+                <dd>
+                  {runtime.context_length
+                    ? tx("tokenCount", { count: runtime.context_length.toLocaleString(localeTag) })
+                    : "—"}
+                </dd>
+              </div>
+              <div>
+                <dt>{tx("generation")}</dt>
+                <dd>
+                  {runtime.tokens_per_second
+                    ? tx("tokensPerSecond", { count: runtime.tokens_per_second.toFixed(1) })
+                    : "—"}
+                </dd>
+              </div>
             </dl>
           </section>
 
           <section className="security-card card">
             <div className="card-heading">
-              <span className="card-title">Safety boundary</span>
+              <span className="card-title">{tx("safetyBoundary")}</span>
               <span className="shield-icon" aria-hidden="true">◆</span>
             </div>
-            <p>Agent proposals are inert until the Permission Broker issues a one-time permit.</p>
-            <div className="security-status"><span className="status-dot is-ready" /> side effects locked</div>
+            <p>{tx("securityDescription")}</p>
+            <div className="security-status">
+              <span className="status-dot is-ready" /> {tx("sideEffectsLocked")}
+            </div>
           </section>
 
           <div className="inspector-bottom">
             {stopMessage && <div className="stop-message" role="status">{stopMessage}</div>}
             <button className="stop-button" type="button" onClick={() => void handleStop()}>
               <span aria-hidden="true">■</span>
-              <span>Stop everything</span>
+              <span>{tx("stopEverything")}</span>
             </button>
           </div>
         </aside>
       </div>
 
       <footer className="statusbar">
-        <span><span className="status-dot is-ready" /> Local-first mode</span>
-        <span>Permissions: strict</span>
+        <span><span className="status-dot is-ready" /> {tx("localFirstMode")}</span>
+        <span>{tx("permissionsStrict")}</span>
+        <span>{persistenceHydrated ? tx("databaseReady") : tx("databaseLoading")}</span>
         <span className="statusbar-spacer" />
-        <span>Telemetry off until enabled</span>
+        <span>{tx("apiKeySessionOnly")}</span>
       </footer>
     </div>
   );

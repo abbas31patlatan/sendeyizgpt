@@ -1,9 +1,8 @@
 //! Tool manifests, broker-mediated invocation and untrusted output types.
 
 use aegis_permissions::{
-    ActionKind, ActionPreview, ActionRequest, ActionTarget, ApprovalRequest, Capability,
-    CommandPreview, ExecutionPermit, PermissionBroker, PermissionDecision, PermissionError,
-    PermissionPolicy, RiskLevel,
+    ActionRequest, ApprovalRequest, Capability, ExecutionPermit, PermissionBroker,
+    PermissionDecision, PermissionError, RiskLevel,
 };
 use aegis_protocol::RequestId;
 use async_trait::async_trait;
@@ -235,7 +234,9 @@ impl ToolRuntime {
                             action,
                         },
                     );
-                Ok(ToolInvocation::ApprovalRequired { approval })
+                Ok(ToolInvocation::ApprovalRequired {
+                    approval: *approval,
+                })
             }
             PermissionDecision::Denied { reason } => Ok(ToolInvocation::Denied { reason }),
         }
@@ -323,8 +324,8 @@ fn validate_input(manifest: &ToolManifest, input: &Value) -> Result<(), ToolErro
 }
 
 fn validate_output(manifest: &ToolManifest, result: &ToolResult) -> Result<(), ToolError> {
-    let output_bytes = serde_json::to_vec(result)
-        .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+    let output_bytes =
+        serde_json::to_vec(result).map_err(|error| ToolError::InvalidInput(error.to_string()))?;
     if output_bytes.len() > manifest.limits.max_output_bytes {
         return Err(ToolError::OutputTooLarge {
             actual: output_bytes.len(),
@@ -418,6 +419,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aegis_permissions::{
+        ActionKind, ActionPreview, ActionTarget, CommandPreview, PermissionPolicy,
+    };
     use chrono::Utc;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -486,7 +490,8 @@ mod tests {
 
     #[test]
     fn external_output_is_marked_and_bounded() {
-        let output = UntrustedContent::from_text("browser:https://example.test", "abcdef".to_owned(), 3);
+        let output =
+            UntrustedContent::from_text("browser:https://example.test", "abcdef".to_owned(), 3);
         assert_eq!(output.text, "abc");
         assert!(output.truncated);
         assert!(!output.content_hash.is_empty());

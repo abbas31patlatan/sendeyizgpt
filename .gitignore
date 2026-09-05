@@ -35,3 +35,11 @@ apps/desktop/src-tauri/icons/*.png
 /aegis-*.zip
 *.tsbuildinfo
 /.repo-meta/
+
+
+# Generated native llama.cpp runtime
+/build/llama.cpp/
+/build/llama-build/
+apps/desktop/src-tauri/runtime/llama-server.exe
+apps/desktop/src-tauri/runtime/LLAMA_CPP_BUILD.txt
+apps/desktop/src-tauri/runtime/LLAMA_CPP_LICENSE.txt

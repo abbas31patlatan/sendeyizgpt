@@ -126,7 +126,7 @@ pub struct CommandPreview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "target_kind", rename_all = "snake_case")]
 pub enum ActionTarget {
     None,
     Path {
@@ -240,7 +240,7 @@ pub struct ApprovalRequestView {
 #[derive(Debug, Clone)]
 pub enum PermissionDecision {
     AutoApproved { permit: ExecutionPermit },
-    ApprovalRequired { approval: ApprovalRequest },
+    ApprovalRequired { approval: Box<ApprovalRequest> },
     Denied { reason: String },
 }
 
@@ -337,7 +337,10 @@ impl PermissionBroker {
         &self.policy
     }
 
-    pub fn evaluate(&mut self, request: ActionRequest) -> Result<PermissionDecision, PermissionError> {
+    pub fn evaluate(
+        &mut self,
+        request: ActionRequest,
+    ) -> Result<PermissionDecision, PermissionError> {
         if request.tool_id.trim().is_empty() {
             return Ok(PermissionDecision::Denied {
                 reason: "tool id is required".to_owned(),
@@ -347,7 +350,9 @@ impl PermissionBroker {
         if let Err(reason) = self.validate_request(&request) {
             let reason_text = reason.to_string();
             self.record_audit(&request, AuditDecision::Denied, Some(reason_text.clone()))?;
-            return Ok(PermissionDecision::Denied { reason: reason_text });
+            return Ok(PermissionDecision::Denied {
+                reason: reason_text,
+            });
         }
 
         if self.policy.auto_approve_read_only && self.is_safe_read_only(&request) {
@@ -376,14 +381,18 @@ impl PermissionBroker {
             },
         );
         self.record_audit(&request, AuditDecision::ApprovalRequested, None)?;
-        Ok(PermissionDecision::ApprovalRequired { approval })
+        Ok(PermissionDecision::ApprovalRequired {
+            approval: Box::new(approval),
+        })
     }
 
     pub fn approval_for_ui(&self, approval_id: Uuid) -> Option<ApprovalRequestView> {
-        self.pending.get(&approval_id).map(|pending| ApprovalRequestView {
-            approval: pending.approval.clone(),
-            confirmation_nonce: pending.confirmation_nonce.clone(),
-        })
+        self.pending
+            .get(&approval_id)
+            .map(|pending| ApprovalRequestView {
+                approval: pending.approval.clone(),
+                confirmation_nonce: pending.confirmation_nonce.clone(),
+            })
     }
 
     pub fn approve(
@@ -455,11 +464,19 @@ impl PermissionBroker {
         }
         let request_digest = request.digest()?;
         if record.request_digest != request_digest {
-            self.record_audit(request, AuditDecision::PermitRejected, Some("digest mismatch".to_owned()))?;
+            self.record_audit(
+                request,
+                AuditDecision::PermitRejected,
+                Some("digest mismatch".to_owned()),
+            )?;
             return Err(PermissionError::PermitBoundToDifferentRequest);
         }
         if record.expires_at <= Utc::now() {
-            self.record_audit(request, AuditDecision::PermitRejected, Some("permit expired".to_owned()))?;
+            self.record_audit(
+                request,
+                AuditDecision::PermitRejected,
+                Some("permit expired".to_owned()),
+            )?;
             return Err(PermissionError::PermitExpired);
         }
         self.record_audit(request, AuditDecision::PermitConsumed, None)?;
@@ -500,7 +517,9 @@ impl PermissionBroker {
             }
             ActionTarget::Command { cwd, program, .. } => {
                 if program.trim().is_empty() {
-                    return Err(PermissionError::InvalidTarget("command program is empty".to_owned()));
+                    return Err(PermissionError::InvalidTarget(
+                        "command program is empty".to_owned(),
+                    ));
                 }
                 let normalized = canonicalize_candidate(cwd)?;
                 if !self.is_within_workspace(&normalized) {
@@ -517,7 +536,9 @@ impl PermissionBroker {
                     ));
                 }
                 if method.trim().is_empty() {
-                    return Err(PermissionError::InvalidTarget("HTTP method is empty".to_owned()));
+                    return Err(PermissionError::InvalidTarget(
+                        "HTTP method is empty".to_owned(),
+                    ));
                 }
                 Ok(())
             }
@@ -539,7 +560,10 @@ impl PermissionBroker {
 
         match request.action {
             ActionKind::ReadFile => {
-                request.capabilities.iter().all(|cap| *cap == Capability::FilesystemRead)
+                request
+                    .capabilities
+                    .iter()
+                    .all(|cap| *cap == Capability::FilesystemRead)
                     && matches!(
                         &request.target,
                         ActionTarget::Path {
@@ -549,7 +573,10 @@ impl PermissionBroker {
                     )
             }
             ActionKind::ReadSystemInfo => {
-                request.capabilities.iter().all(|cap| *cap == Capability::SystemInfo)
+                request
+                    .capabilities
+                    .iter()
+                    .all(|cap| *cap == Capability::SystemInfo)
                     && matches!(&request.target, ActionTarget::None)
             }
             _ => false,
@@ -562,7 +589,10 @@ impl PermissionBroker {
             .any(|root| path == root || path.starts_with(root))
     }
 
-    fn issue_permit(&mut self, request: &ActionRequest) -> Result<ExecutionPermit, PermissionError> {
+    fn issue_permit(
+        &mut self,
+        request: &ActionRequest,
+    ) -> Result<ExecutionPermit, PermissionError> {
         let digest = request.digest()?;
         Ok(self.insert_permit(
             digest,
@@ -570,7 +600,11 @@ impl PermissionBroker {
         ))
     }
 
-    fn insert_permit(&mut self, request_digest: [u8; 32], expires_at: DateTime<Utc>) -> ExecutionPermit {
+    fn insert_permit(
+        &mut self,
+        request_digest: [u8; 32],
+        expires_at: DateTime<Utc>,
+    ) -> ExecutionPermit {
         let permit_id = Uuid::new_v4();
         self.permits.insert(
             permit_id,
@@ -655,10 +689,12 @@ fn action_target_is_consistent(action: ActionKind, target: &ActionTarget) -> boo
                 ..
             }
         ),
-        ActionKind::ExecuteCommand | ActionKind::GitPush => matches!(target, ActionTarget::Command { .. }),
-        ActionKind::HttpRequest
-        | ActionKind::BrowserInteraction
-        | ActionKind::UploadFile => matches!(target, ActionTarget::Url { .. }),
+        ActionKind::ExecuteCommand | ActionKind::GitPush => {
+            matches!(target, ActionTarget::Command { .. })
+        }
+        ActionKind::HttpRequest | ActionKind::BrowserInteraction | ActionKind::UploadFile => {
+            matches!(target, ActionTarget::Url { .. })
+        }
         ActionKind::StartProcess
         | ActionKind::StopProcess
         | ActionKind::CaptureScreen
@@ -714,10 +750,11 @@ fn canonicalize_candidate(path: &Path) -> Result<PathBuf, PermissionError> {
         }
     }
 
-    let mut normalized = fs::canonicalize(&cursor).map_err(|source| PermissionError::Canonicalization {
-        path: cursor.clone(),
-        source,
-    })?;
+    let mut normalized =
+        fs::canonicalize(&cursor).map_err(|source| PermissionError::Canonicalization {
+            path: cursor.clone(),
+            source,
+        })?;
     while let Some(component) = missing.pop() {
         normalized.push(component);
     }
@@ -755,7 +792,10 @@ pub enum PermissionError {
     #[error("invalid action target: {0}")]
     InvalidTarget(String),
     #[error("failed to canonicalize {path}: {source}")]
-    Canonicalization { path: PathBuf, source: std::io::Error },
+    Canonicalization {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("serialization failed: {0}")]
     Serialization(serde_json::Error),
     #[error("approval not found: {0}")]
@@ -854,7 +894,9 @@ mod tests {
         broker.consume_permit(permit, &request).expect("consume");
         assert!(matches!(
             broker.consume_permit(
-                ExecutionPermit { permit_id: Uuid::new_v4() },
+                ExecutionPermit {
+                    permit_id: Uuid::new_v4()
+                },
                 &request
             ),
             Err(PermissionError::PermitNotFound)
@@ -872,7 +914,10 @@ mod tests {
         let decision = broker
             .evaluate(command_request(directory.path().to_path_buf()))
             .expect("evaluate");
-        assert!(matches!(decision, PermissionDecision::ApprovalRequired { .. }));
+        assert!(matches!(
+            decision,
+            PermissionDecision::ApprovalRequired { .. }
+        ));
     }
 
     #[test]

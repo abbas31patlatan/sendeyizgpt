@@ -63,6 +63,10 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
 
+      - name: Build pinned llama.cpp runtime
+        shell: pwsh
+        run: .\scripts\build-llama-runtime.ps1
+
       - name: Build Tauri installers
         shell: pwsh
         run: npm --prefix apps/desktop exec -- tauri build --target x86_64-pc-windows-msvc

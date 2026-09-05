@@ -1,7 +1,17 @@
 //! Runtime-independent inference contracts and transparent resource estimates.
 //!
-//! No C/C++ backend is linked here. A worker adapter will implement this trait
-//! for a supervised llama.cpp process first, then for future runtimes.
+//! Native inference is supervised out-of-process: the llama.cpp server owns GGUF tensor
+//! loading while this crate owns validation, lifecycle, health checks and cancellation boundaries.
+
+pub mod catalog;
+pub mod llama_server;
+
+pub use catalog::{
+    ModelScanIssue, ModelScanReport, ScannedModel, inspect_gguf_model, scan_model_directory,
+};
+pub use llama_server::{
+    LlamaServerRuntime, NativeRuntimeMetrics, NativeRuntimePhase, NativeRuntimeStatus,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -30,25 +40,13 @@ pub enum AcceleratorKind {
     Remote,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
     pub vision: bool,
     pub tool_calling: bool,
     pub reasoning: bool,
     pub embeddings: bool,
     pub audio_input: bool,
-}
-
-impl Default for ModelCapabilities {
-    fn default() -> Self {
-        Self {
-            vision: false,
-            tool_calling: false,
-            reasoning: false,
-            embeddings: false,
-            audio_input: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,14 +239,19 @@ impl LoadProfile {
 
     pub fn validate(&self) -> Result<(), InferenceError> {
         if self.context_length == 0
+            || self.context_length > 1_048_576
             || self.cpu_threads == 0
+            || self.cpu_threads > 256
             || self.batch_size == 0
+            || self.batch_size > 65_536
             || self.physical_batch_size == 0
             || self.physical_batch_size > self.batch_size
             || self.parallel_requests == 0
+            || self.parallel_requests > 16
         {
             return Err(InferenceError::InvalidProfile(
-                "context, threads, batches and parallel requests must be positive; physical batch cannot exceed batch".to_owned(),
+                "context, threads, batches and parallel requests are outside the supported limits"
+                    .to_owned(),
             ));
         }
         if self.gpu_offload_percent > 100 {
@@ -264,6 +267,19 @@ impl LoadProfile {
             return Err(InferenceError::InvalidProfile(
                 "sampling values are outside their supported ranges".to_owned(),
             ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_model(&self, model: &ModelDescriptor) -> Result<(), InferenceError> {
+        self.validate()?;
+        if let Some(capacity) = model.context_capacity {
+            if self.context_length > capacity {
+                return Err(InferenceError::InvalidProfile(format!(
+                    "context length {} exceeds model capacity {}",
+                    self.context_length, capacity
+                )));
+            }
         }
         Ok(())
     }
@@ -301,8 +317,11 @@ pub struct MemoryEstimate {
 }
 
 impl MemoryEstimate {
-    pub fn for_model(model: &ModelDescriptor, profile: &LoadProfile) -> Result<Self, InferenceError> {
-        profile.validate()?;
+    pub fn for_model(
+        model: &ModelDescriptor,
+        profile: &LoadProfile,
+    ) -> Result<Self, InferenceError> {
+        profile.validate_for_model(model)?;
         let file_bytes = model.file_size_bytes as f64;
         let weights_bytes = (file_bytes * 1.05).ceil() as u64;
         let mut assumptions = vec![
@@ -326,15 +345,15 @@ impl MemoryEstimate {
                 (tokens * layers as f64 * kv_heads as f64 * head_dim * (k + v)).ceil() as u64
             }
             _ => {
-                assumptions.push("KV cache metadata is incomplete; KV estimate is omitted".to_owned());
+                assumptions
+                    .push("KV cache metadata is incomplete; KV estimate is omitted".to_owned());
                 0
             }
         };
-        let scratch_bytes = (256_u64 * 1024 * 1024)
-            .saturating_add((profile.batch_size as u64) * 1024 * 1024 / 2);
-        let gpu_weight_bytes = weights_bytes
-            .saturating_mul(profile.gpu_offload_percent as u64)
-            / 100;
+        let scratch_bytes =
+            (256_u64 * 1024 * 1024).saturating_add((profile.batch_size as u64) * 1024 * 1024 / 2);
+        let gpu_weight_bytes =
+            weights_bytes.saturating_mul(profile.gpu_offload_percent as u64) / 100;
         let cpu_weight_bytes = weights_bytes.saturating_sub(gpu_weight_bytes);
         let gpu_kv_bytes = if profile.kv_cache_offload {
             kv_cache_bytes
@@ -444,7 +463,11 @@ pub trait InferenceBackend: Send + Sync {
 
     async fn tokenize(&self, model: &LoadedModel, text: &str) -> Result<Vec<u32>, InferenceError>;
 
-    async fn detokenize(&self, model: &LoadedModel, tokens: &[u32]) -> Result<String, InferenceError>;
+    async fn detokenize(
+        &self,
+        model: &LoadedModel,
+        tokens: &[u32],
+    ) -> Result<String, InferenceError>;
 
     async fn model_info(&self, model: &LoadedModel) -> Result<ModelDescriptor, InferenceError>;
 
@@ -467,6 +490,8 @@ pub enum InferenceError {
     IncompatibleModel(String),
     #[error("inference worker is unavailable: {0}")]
     WorkerUnavailable(String),
+    #[error("local model scan failed: {0}")]
+    ModelScan(String),
     #[error("inference operation was cancelled")]
     Cancelled,
     #[error("inference backend failed: {0}")]
@@ -501,7 +526,8 @@ mod tests {
 
     #[test]
     fn profiles_validate_and_estimates_are_labeled() {
-        let estimate = MemoryEstimate::for_model(&model(), &LoadProfile::balanced()).expect("estimate");
+        let estimate =
+            MemoryEstimate::for_model(&model(), &LoadProfile::balanced()).expect("estimate");
         assert!(estimate.estimated_vram_bytes > 0);
         assert_eq!(estimate.confidence, EstimateConfidence::High);
         assert!(!estimate.assumptions.is_empty());

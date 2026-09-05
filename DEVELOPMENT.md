@@ -8,7 +8,10 @@
   audit strategy.
 - Keep large content out of SQLite rows; use attachment/blob references.
 - Never commit model files, API keys, local databases or generated installers.
+- Never commit the generated `llama-server` binary or its build tree; reproduce it from the pinned source commit.
 - Do not treat demo data as production state.
+- Add a new numbered migration for schema changes; never edit an applied migration.
+- Keep provider secrets out of both SQLite and browser storage; only non-secret UI/provider preferences may use the preview fallback.
 
 ## Rust workspace
 
@@ -38,6 +41,113 @@ npm run typecheck
 npm run build
 ```
 
+### Local provider integration
+
+The current chat transport targets the OpenAI-compatible API surface:
+`GET /models` and `POST /chat/completions` under the configured base URL. For
+loopback LM Studio and Ollama servers, the model library additionally probes
+their native catalogs (`/api/v1/models` and `/api/tags`) and can issue a
+provider-specific load/warm-up request before selecting the returned model.
+Streaming uses server-sent events and accepts both regular content deltas and
+the common `reasoning_content`/ `reasoning` delta names.
+
+Provider configuration is deliberately session-oriented. Do not commit API
+keys, place them in local storage, or include them in diagnostic logs. Remote
+providers should use HTTPS; local development endpoints may use loopback HTTP.
+The provider adapter validates message count, message size, sampling values,
+base URL credentials, response framing and cancellation before a request can
+start.
+
+### Agent tools and multi-LLM routing
+
+The desktop command `start_chat` builds a runtime tool registry from the request:
+the always-on read-only built-ins are calculator, UTC time, JSON formatting, text
+statistics, bounded text search, JSON Pointer lookup and unit conversion; optional
+web tools provide HTTPS-only search, multi-page research and page distillation;
+an optional worker endpoint adds bounded `delegate_task`. The registry is sent as
+OpenAI-compatible function schemas and a short system instruction is inserted by
+the native shell, so the frontend does not need to duplicate orchestration rules.
+
+The native loop supports streamed tool-call deltas, parallel calls in one round,
+visible `tool` events, cancellation and up to eight total rounds. Invalid JSON or
+tool errors are returned to the model for correction up to three attempts per
+tool. If a provider rejects the tool schema, the request retries once as ordinary
+streaming chat. Worker calls use a separate non-streaming bounded completion; a
+worker transport/timeout failure invokes the master with the same task.
+
+When adding a tool, keep it read-only unless it has a manifest, explicit risk
+level, Permission Broker preview and audit path. Web content must be treated as
+untrusted data and must never be promoted to a system message.
+
+### Local prompt automations
+
+Automations are intentionally limited to repeatable chat prompts. Verify the
+following on a Windows desktop build:
+
+1. Create a routine with a short interval and keep it disabled until the provider
+   connection has been checked.
+2. Enable it, wait for the app-open scheduler to create a separate conversation,
+   then inspect the streamed result from the Automations card.
+3. Pause the routine and confirm no further run is started; delete it only after a
+   completed or cancelled run.
+4. Restart the app and confirm the routine definition, status and next-run state
+   survive through SQLite.
+5. Confirm routine prompts never launch tools, shell commands or writes, and that
+   an API key remains session-only.
+
+The scheduler is a foreground/app-open boundary. Do not describe it as an OS
+background task or event-source engine until the permission, notification and
+worker boundaries are implemented.
+
+### Local GGUF catalog checks
+
+The model-library path is a real native workflow, not seeded demo data. Register a
+small test directory from the desktop UI, scan it, and verify that valid `.gguf`
+files appear with their parsed architecture, context and quantization metadata.
+Add a deliberately corrupt `.gguf` file to confirm it is reported as an issue
+without hiding the valid model. Re-scan after changing or removing a file and
+confirm the SQLite snapshot reflects the current directory.
+
+The scanner must remain metadata-only and bounded: do not add tensor reads, model
+execution, symlink traversal or unbounded recursive discovery. A successful
+preflight is only an estimate; verify the native runtime panel reaches **Ready**
+after `/health` before claiming that a model was loaded. Run the focused tests with:
+
+```powershell
+cargo test -p aegis-inference catalog
+cargo test -p aegis-database model_library_repository
+```
+
+The Model library also offers **Discover now** and one-click provider model
+loading. Discovery checks the supported common roots in the user's profile and is
+safe to repeat; a filesystem watcher plus bounded refresh keeps the inventory
+current while the app is focused. Custom paths remain explicitly registered and
+scanned through the same bounded scanner, while native LM Studio/Ollama models do
+not require a local GGUF path.
+
+### Native llama.cpp runtime
+
+The desktop's model-file path uses a real `llama-server` process. The build script
+fetches the pinned upstream commit, configures a static CPU-native Windows
+runtime and writes the binary plus `LLAMA_CPP_BUILD.txt` to the ignored runtime
+directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-llama-runtime.ps1
+```
+
+This requires Git, CMake and the Visual Studio C++ workload. No model file is
+downloaded by the build. For GPU acceleration, build a compatible llama.cpp
+server separately and select its executable in the native runtime panel or make
+it available on PATH; the app will not silently replace a failed native path with
+a remote provider.
+
+After launch, verify the Model library status reaches **Ready** and that the
+chat route points to the reported loopback `/v1` endpoint. The runtime panel
+should show real prompt/generation counters and throughput after a request;
+missing device telemetry must remain unavailable. Stop and reload the model to
+exercise process cleanup and generation-safe restart behavior.
+
 ## Windows build
 
 Use the MSVC Rust target. The application should run as a standard user. The
@@ -47,17 +157,23 @@ elevation must be implemented as explicit, narrowly-scoped operations.
 Before a release:
 
 1. Build and test on Windows 10 and Windows 11 x64.
-2. Exercise an AMD Vulkan machine, including the RX 5700 XT target system.
-3. Validate worker restart after an inference process failure.
-4. Inspect the Tauri capability file and generated installer permissions.
-5. Produce a diagnostic bundle with secrets and personal content redacted.
+2. Exercise the bundled CPU runtime with a small valid GGUF: load, stream, cancel,
+   unload and reload it.
+3. If an external GPU runtime is supplied, exercise the AMD Vulkan machine,
+   including the RX 5700 XT target system, and record the exact runtime build.
+4. Validate native process restart after an inference process failure.
+5. Inspect the Tauri capability file, packaged `llama-server.exe` hash and generated
+   installer permissions.
+6. Produce a diagnostic bundle with secrets and personal content redacted.
 
 ## Adding a backend
 
-Implement `InferenceBackend` in a worker adapter. Keep model format parsing,
-runtime descriptors and UI presentation separate. The adapter must expose
-capabilities and metrics, reject incompatible profiles with structured errors,
-and support cancellation.
+Keep model format parsing, runtime descriptors and UI presentation separate. The
+current M2b adapter supervises an external `llama-server` and deliberately reuses
+its OpenAI-compatible HTTP surface for stream/reasoning/cancel. A future direct
+`InferenceBackend` worker may embed or wrap another native API, but it must expose
+capabilities and metrics, reject incompatible profiles with structured errors and
+support cancellation without moving C/C++ code into the Tauri process.
 
 ## Adding a tool
 
@@ -68,3 +184,19 @@ and support cancellation.
 5. Consume a one-time permit immediately before the effect.
 6. Emit a redacted audit event and wrap external output as untrusted content.
 
+
+
+## Durable state and workspace registry
+
+The Tauri shell opens `aegis.sqlite3` in the per-user application-data directory
+and applies migrations before commands are exposed. `aegis-database` owns typed
+repository records and transaction boundaries. Conversation snapshots preserve
+message reasoning and delete through foreign-key cascade. Local automation definitions
+share the same typed repository and survive restarts. The frontend pauses native
+conversation writes while streaming and flushes after a terminal event.
+
+The workspace registry intentionally stops at read-only metadata validation:
+`validate_workspace_path` checks existence, directory shape and canonical path
+without reading project contents or granting an agent access. When a tool worker is
+introduced, it must consume a Permission Broker permit bound to the registered
+scope and revalidate it immediately before any effect.

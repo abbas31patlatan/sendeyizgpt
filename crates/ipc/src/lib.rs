@@ -95,10 +95,7 @@ impl FrameAuthenticator {
     }
 
     pub fn verify<T: Serialize>(&self, frame: &Frame<T>) -> Result<(), IpcError> {
-        let tag = frame
-            .auth_tag
-            .as_deref()
-            .ok_or(IpcError::MissingAuthTag)?;
+        let tag = frame.auth_tag.as_deref().ok_or(IpcError::MissingAuthTag)?;
         let tag_bytes = hex_decode(tag).ok_or(IpcError::MalformedAuthTag)?;
         let bytes = frame.signing_bytes().map_err(IpcError::Protocol)?;
         let mut mac = HmacSha256::new_from_slice(&self.secret.0)
