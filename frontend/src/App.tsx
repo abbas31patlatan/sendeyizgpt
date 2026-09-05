@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   cancelOperation,
+  discoverLocalModels,
   deleteAutomation,
   deleteModelLibrary,
   getNativeRuntimeStatus,
@@ -47,6 +48,7 @@ import {
   type LocalModel,
   type ModelLibrary,
   type ModelLoadEstimate,
+  type ModelDiscoverySummary,
   type ModelProfile,
   type ModelScanSummary,
   type NativeRuntimePhase,
@@ -70,6 +72,7 @@ type StoredMessage = ChatMessage & {
   id: string;
   createdAt: number;
   reasoning?: string;
+  toolActivity?: string[];
   status?: MessageStatus;
 };
 
@@ -89,6 +92,11 @@ type ProviderSettings = {
   max_tokens: number;
   temperature: number;
   system_prompt: string;
+  worker_enabled: boolean;
+  worker_base_url: string;
+  worker_model: string;
+  worker_api_key: string;
+  web_tools_enabled: boolean;
 };
 
 type Theme = "system" | "dark" | "light";
@@ -125,6 +133,11 @@ const defaultSettings: ProviderSettings = {
   max_tokens: 1024,
   temperature: 0.7,
   system_prompt: "",
+  worker_enabled: false,
+  worker_base_url: "http://127.0.0.1:1235/v1",
+  worker_model: "",
+  worker_api_key: "",
+  web_tools_enabled: false,
 };
 
 function createId(prefix: string): string {
@@ -193,6 +206,15 @@ function loadSettings(): ProviderSettings {
         typeof value.system_prompt === "string"
           ? value.system_prompt.slice(0, 16_384)
           : defaultSettings.system_prompt,
+      worker_enabled: value.worker_enabled === true,
+      worker_base_url:
+        typeof value.worker_base_url === "string"
+          ? value.worker_base_url
+          : defaultSettings.worker_base_url,
+      worker_model:
+        typeof value.worker_model === "string" ? value.worker_model : defaultSettings.worker_model,
+      worker_api_key: "",
+      web_tools_enabled: value.web_tools_enabled === true,
     };
   } catch {
     return defaultSettings;
@@ -472,6 +494,7 @@ function App() {
   const [modelLibraryBusy, setModelLibraryBusy] = useState(false);
   const [modelScanSummary, setModelScanSummary] = useState<ModelScanSummary | null>(null);
   const [selectedLocalModelId, setSelectedLocalModelId] = useState<string | null>(null);
+  const [localModelQuery, setLocalModelQuery] = useState("");
   const [loadPreset, setLoadPreset] = useState<LoadPreset>("balanced");
   const [loadEstimate, setLoadEstimate] = useState<ModelLoadEstimate | null>(null);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
@@ -494,7 +517,11 @@ function App() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [providerDiagnostics, setProviderDiagnostics] =
     useState<ProviderDiagnostics | null>(null);
+  const [workerDiagnostics, setWorkerDiagnostics] =
+    useState<ProviderDiagnostics | null>(null);
   const [connectionMessage, setConnectionMessage] = useState<string | null>(null);
+  const [autoDiscoveryBusy, setAutoDiscoveryBusy] = useState(false);
+  const [autoDiscoveryMessage, setAutoDiscoveryMessage] = useState<string | null>(null);
   const operationBindings = useRef(new Map<string, ChatBinding>());
   const automationOperations = useRef(new Map<string, string>());
   const queuedEvents = useRef(new Map<string, ChatEvent[]>());
@@ -535,6 +562,17 @@ function App() {
     () => localModels.find((model) => model.id === selectedLocalModelId) ?? null,
     [localModels, selectedLocalModelId],
   );
+  const visibleLocalModels = useMemo(() => {
+    const query = localModelQuery.trim().toLocaleLowerCase(localeTag);
+    if (!query) {
+      return localModels;
+    }
+    return localModels.filter((model) =>
+      [model.displayName, model.filePath, model.architecture, model.quantization, model.family]
+        .filter((value): value is string => Boolean(value))
+        .some((value) => value.toLocaleLowerCase(localeTag).includes(query)),
+    );
+  }, [localModelQuery, localModels, localeTag]);
 
   const refreshRuntime = useCallback(async () => {
     const [coreResult, nativeResult] = await Promise.allSettled([
@@ -672,6 +710,19 @@ function App() {
         }
         streamDeltas.current.set(event.operation_id, current);
         scheduleStreamFlush();
+        return;
+      }
+
+      if (event.type === "tool") {
+        updateConversation(binding.conversationId, (conversation) =>
+          updateStoredMessage(conversation, binding.assistantId, (message) => ({
+            ...message,
+            toolActivity: [
+              ...(message.toolActivity ?? []).slice(-15),
+              `${event.tool_id} · ${event.detail}`,
+            ],
+          })),
+        );
         return;
       }
 
@@ -895,6 +946,59 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let disposed = false;
+    void discoverLocalModels()
+      .then((summary) => {
+        if (disposed) {
+          return;
+        }
+        setModelLibraries(summary.libraries);
+        setLocalModels(summary.models);
+        setSelectedLocalModelId((current) => current ?? summary.models[0]?.id ?? null);
+      })
+      .catch(() => {
+        // Auto-discovery is a native-only enhancement; manual paths remain available.
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const refresh = () => {
+      if (disposed || autoDiscoveryBusy || document.visibilityState === "hidden") {
+        return;
+      }
+      void discoverLocalModels()
+        .then((summary) => {
+          if (disposed) {
+            return;
+          }
+          setModelLibraries(summary.libraries);
+          setLocalModels(summary.models);
+          setSelectedLocalModelId((current) =>
+            current && summary.models.some((model) => model.id === current)
+              ? current
+              : summary.models[0]?.id ?? null,
+          );
+        })
+        .catch(() => {
+          // Background discovery is best effort; the indexed inventory remains usable.
+        });
+    };
+    const timer = window.setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [autoDiscoveryBusy]);
+
+  useEffect(() => {
     if (!selectedLocalModelId) {
       setLoadEstimate(null);
       return;
@@ -928,6 +1032,10 @@ function App() {
           max_tokens: settings.max_tokens,
           temperature: settings.temperature,
           system_prompt: settings.system_prompt,
+          worker_enabled: settings.worker_enabled,
+          worker_base_url: settings.worker_base_url,
+          worker_model: settings.worker_model,
+          web_tools_enabled: settings.web_tools_enabled,
         };
         window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(nonSecretSettings));
         window.localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
@@ -1122,6 +1230,14 @@ function App() {
       model: settings.model.trim(),
       api_key: settings.api_key.trim() || undefined,
     };
+    const worker: ProviderConfig | undefined =
+      settings.worker_enabled && settings.worker_base_url.trim() && settings.worker_model.trim()
+        ? {
+            base_url: settings.worker_base_url.trim(),
+            model: settings.worker_model.trim(),
+            api_key: settings.worker_api_key.trim() || undefined,
+          }
+        : undefined;
 
     try {
       const started = await startChat({
@@ -1129,6 +1245,8 @@ function App() {
         messages: history,
         max_tokens: settings.max_tokens,
         temperature: settings.temperature,
+        worker,
+        web_tools: settings.web_tools_enabled,
       });
       const binding = { conversationId, assistantId };
       operationBindings.current.set(started.operation_id, binding);
@@ -1170,6 +1288,14 @@ function App() {
         model: settings.model.trim(),
         api_key: settings.api_key.trim() || undefined,
       };
+      const worker: ProviderConfig | undefined =
+        settings.worker_enabled && settings.worker_base_url.trim() && settings.worker_model.trim()
+          ? {
+              base_url: settings.worker_base_url.trim(),
+              model: settings.worker_model.trim(),
+              api_key: settings.worker_api_key.trim() || undefined,
+            }
+          : undefined;
       if (!provider.base_url || !provider.model) {
         if (!automatic) {
           setAutomationMessage(tx("automationProviderRequired"));
@@ -1220,6 +1346,8 @@ function App() {
           messages: history,
           max_tokens: settings.max_tokens,
           temperature: settings.temperature,
+          worker,
+          web_tools: settings.web_tools_enabled,
         });
         automationOperations.current.set(automationId, started.operation_id);
         const binding: ChatBinding = {
@@ -1343,6 +1471,32 @@ function App() {
     }
   };
 
+  const handleCheckWorkerConnection = async () => {
+    setWorkerDiagnostics(null);
+    if (!settings.worker_base_url.trim() || !settings.worker_model.trim()) {
+      return;
+    }
+    try {
+      const diagnostics = await inspectProvider({
+        base_url: settings.worker_base_url.trim(),
+        model: settings.worker_model.trim(),
+        api_key: settings.worker_api_key.trim() || undefined,
+      });
+      setWorkerDiagnostics(diagnostics);
+    } catch (workerError) {
+      setWorkerDiagnostics({
+        status: "error",
+        endpoint: settings.worker_base_url.trim(),
+        local: settings.worker_base_url.trim().startsWith("http://127.0.0.1"),
+        latencyMs: 0,
+        modelCount: 0,
+        models: [],
+        error: errorMessage(workerError),
+        retryable: false,
+      });
+    }
+  };
+
   const applyModelScan = (summary: ModelScanSummary) => {
     setModelLibraries((current) => [
       summary.library,
@@ -1358,6 +1512,42 @@ function App() {
         ? current
         : summary.models[0]?.id ?? null,
     );
+  };
+
+  const applyModelDiscovery = (summary: ModelDiscoverySummary) => {
+    setModelLibraries(summary.libraries);
+    setLocalModels(summary.models);
+    setSelectedLocalModelId((current) =>
+      current && summary.models.some((model) => model.id === current)
+        ? current
+        : summary.models[0]?.id ?? null,
+    );
+    setModelScanSummary(null);
+  };
+
+  const handleDiscoverLocalModels = async () => {
+    if (autoDiscoveryBusy) {
+      return;
+    }
+    setAutoDiscoveryBusy(true);
+    setAutoDiscoveryMessage(null);
+    try {
+      const summary = await discoverLocalModels();
+      applyModelDiscovery(summary);
+      setAutoDiscoveryMessage(
+        tx("autoDiscoveryComplete", {
+          roots: summary.scannedRoots,
+          count: summary.models.length,
+          duration: summary.durationMs,
+        }) + (summary.issues.length > 0
+          ? " · " + tx("modelScanIssues", { count: summary.issues.length })
+          : ""),
+      );
+    } catch (discoveryError) {
+      setAutoDiscoveryMessage(errorMessage(discoveryError));
+    } finally {
+      setAutoDiscoveryBusy(false);
+    }
   };
 
   const handleRegisterModelLibrary = async () => {
@@ -1514,6 +1704,45 @@ function App() {
       setNativeRuntimeMessage(tx("nativeModelReady"));
     } catch (startError) {
       setNativeRuntimeMessage(errorMessage(startError));
+    } finally {
+      setNativeRuntimeBusy(false);
+    }
+  };
+
+  const handleQuickBindModel = async (model: LocalModel) => {
+    if (nativeRuntimeBusy || nativeRuntime.phase === "ready") {
+      setNativeRuntimeMessage(
+        nativeRuntime.phase === "ready"
+          ? tx("nativeRuntimeUnloadFirst")
+          : tx("loadingNativeModel"),
+      );
+      return;
+    }
+    setSelectedLocalModelId(model.id);
+    setNativeRuntimeBusy(true);
+    setNativeRuntimeMessage(null);
+    try {
+      const estimate = await estimateModelLoad(model.id, loadPreset);
+      setLoadEstimate(estimate);
+      const status = await startNativeModel({
+        modelId: model.id,
+        preset: loadPreset,
+        runtimePath: nativeRuntimePath.trim() || undefined,
+      });
+      setNativeRuntime(status);
+      if (status.endpoint) {
+        setSettings((current) => ({
+          ...current,
+          base_url: status.endpoint!.replace(/\/+$/, "") + "/v1",
+          model: status.modelId ?? model.id,
+          api_key: "",
+        }));
+        setModelOptions([]);
+        setProviderDiagnostics(null);
+      }
+      setNativeRuntimeMessage(tx("nativeModelReady"));
+    } catch (bindError) {
+      setNativeRuntimeMessage(errorMessage(bindError));
     } finally {
       setNativeRuntimeBusy(false);
     }
@@ -1935,6 +2164,15 @@ function App() {
               )}
             </div>
             <div className="message-bubble">
+              {message.toolActivity && message.toolActivity.length > 0 && (
+                <div className="tool-activity" aria-label={tx("toolActivity")}>
+                  {message.toolActivity.map((activity, index) => (
+                    <span className="tool-activity-item" key={activity + index}>
+                      <span aria-hidden="true">⚙</span> {activity}
+                    </span>
+                  ))}
+                </div>
+              )}
               {message.reasoning && (
                 <details className="reasoning-block" open={message.status === "streaming"}>
                   <summary>{tx("reasoningTrace")}</summary>
@@ -2202,6 +2440,103 @@ function App() {
             <small>{tx("systemPromptHelp")}</small>
           </label>
         </div>
+        <div className="agent-capability-panel">
+          <div className="agent-capability-header">
+            <div>
+              <strong>{tx("agentCapabilities")}</strong>
+              <span>{tx("agentCapabilitiesDescription")}</span>
+            </div>
+            <span className="pill pill-blue">{tx("runtimeTools")}</span>
+          </div>
+          <label className="capability-toggle">
+            <input
+              type="checkbox"
+              checked={settings.web_tools_enabled}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  web_tools_enabled: event.target.checked,
+                }))
+              }
+            />
+            <span>
+              <strong>{tx("webTools")}</strong>
+              <small>{tx("webToolsDescription")}</small>
+            </span>
+          </label>
+          <label className="capability-toggle">
+            <input
+              type="checkbox"
+              checked={settings.worker_enabled}
+              onChange={(event) =>
+                setSettings((current) => ({
+                  ...current,
+                  worker_enabled: event.target.checked,
+                }))
+              }
+            />
+            <span>
+              <strong>{tx("workerRouting")}</strong>
+              <small>{tx("workerRoutingDescription")}</small>
+            </span>
+          </label>
+          {settings.worker_enabled && (
+            <div className="worker-routing-grid">
+              <label>
+                <span>{tx("workerBaseUrl")}</span>
+                <input
+                  value={settings.worker_base_url}
+                  onChange={(event) =>
+                    setSettings((current) => ({ ...current, worker_base_url: event.target.value }))
+                  }
+                  placeholder="http://127.0.0.1:1235/v1"
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                <span>{tx("workerModel")}</span>
+                <input
+                  value={settings.worker_model}
+                  onChange={(event) =>
+                    setSettings((current) => ({ ...current, worker_model: event.target.value }))
+                  }
+                  placeholder={tx("workerModelPlaceholder")}
+                  spellCheck={false}
+                />
+              </label>
+              <label>
+                <span>{tx("workerApiKey")} <em>{tx("optional")}</em></span>
+                <input
+                  type="password"
+                  value={settings.worker_api_key}
+                  onChange={(event) =>
+                    setSettings((current) => ({ ...current, worker_api_key: event.target.value }))
+                  }
+                  placeholder={tx("remoteProvidersOnly")}
+                  autoComplete="off"
+                />
+              </label>
+              <button
+                className="secondary-button worker-check-button"
+                type="button"
+                onClick={() => void handleCheckWorkerConnection()}
+                disabled={modelsLoading || !settings.worker_base_url.trim() || !settings.worker_model.trim()}
+              >
+                {tx("checkWorker")}
+              </button>
+            </div>
+          )}
+          {workerDiagnostics && (
+            <div className={"worker-health " + (workerDiagnostics.status === "connected" ? "is-ready" : "is-error")}>
+              <span className="status-dot" />
+              <span>{workerDiagnostics.status === "connected" ? tx("workerConnected") : tx("workerUnavailable")}</span>
+              <small>
+                {Math.round(workerDiagnostics.latencyMs)} ms · {workerDiagnostics.modelCount} model
+                {workerDiagnostics.error ? " · " + workerDiagnostics.error : ""}
+              </small>
+            </div>
+          )}
+        </div>
         <div className="settings-actions">
           <button
             className="primary-button"
@@ -2293,6 +2628,25 @@ function App() {
           <span className="pill pill-blue">{tx("metadataOnly")}</span>
         </div>
         <p className="settings-intro">{tx("modelLibraryIntro")}</p>
+        <div className="auto-discovery-strip">
+          <div>
+            <strong>{tx("zeroConfigDiscovery")}</strong>
+            <span>{tx("zeroConfigDiscoveryDescription")}</span>
+          </div>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => void handleDiscoverLocalModels()}
+            disabled={autoDiscoveryBusy || modelLibraryBusy}
+          >
+            {autoDiscoveryBusy ? tx("discovering") : tx("discoverNow")}
+          </button>
+        </div>
+        {autoDiscoveryMessage && (
+          <div className="connection-message discovery-message" role="status">
+            {autoDiscoveryMessage}
+          </div>
+        )}
         <div className="settings-grid">
           <label>
             <span>{tx("modelLibraryName")}</span>
@@ -2455,14 +2809,47 @@ function App() {
           </div>
           <span className="metric-live"><span className="status-dot" /> {tx("metadataOnly")}</span>
         </div>
+        {localModels.length > 0 && (
+          <div className="model-inventory-toolbar">
+            <label className="model-search-field">
+              <span aria-hidden="true">⌕</span>
+              <input
+                value={localModelQuery}
+                onChange={(event) => setLocalModelQuery(event.target.value)}
+                placeholder={tx("searchLocalModels")}
+                aria-label={tx("searchLocalModels")}
+                spellCheck={false}
+              />
+              {localModelQuery && (
+                <button
+                  className="model-search-clear"
+                  type="button"
+                  onClick={() => setLocalModelQuery("")}
+                  aria-label={tx("clearSearch")}
+                  title={tx("clearSearch")}
+                >
+                  ×
+                </button>
+              )}
+            </label>
+            <span className="model-search-count">
+              {visibleLocalModels.length}/{localModels.length}
+            </span>
+          </div>
+        )}
         {localModels.length === 0 ? (
           <div className="catalog-empty">
             <strong>{tx("noLocalModels")}</strong>
             <p>{tx("noLocalModelsDescription")}</p>
           </div>
+        ) : visibleLocalModels.length === 0 ? (
+          <div className="catalog-empty">
+            <strong>{tx("noMatchingModels")}</strong>
+            <p>{tx("noMatchingModelsDescription")}</p>
+          </div>
         ) : (
           <div className="local-model-grid">
-            {localModels.map((model) => (
+            {visibleLocalModels.map((model) => (
               <article
                 className={"local-model-card " + (selectedLocalModelId === model.id ? "is-selected" : "")}
                 key={model.id}
@@ -2509,6 +2896,20 @@ function App() {
                     <span className="muted">{tx("noCapabilities")}</span>
                   )}
                 </div>
+                <button
+                  className="primary-button compact-button model-bind-button"
+                  type="button"
+                  onClick={() => void handleQuickBindModel(model)}
+                  disabled={
+                    autoDiscoveryBusy ||
+                    nativeRuntimeBusy ||
+                    nativeRuntime.phase === "starting" ||
+                    nativeRuntime.phase === "loading" ||
+                    nativeRuntime.phase === "ready"
+                  }
+                >
+                  {tx("oneClickBind")}
+                </button>
               </article>
             ))}
           </div>

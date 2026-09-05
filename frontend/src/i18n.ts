@@ -144,6 +144,28 @@ const en = {
   systemPromptPlaceholder: "Define the assistant's role, tone and boundaries…",
   systemPromptHelp:
     "Sent as a system message before this conversation. The API key is never included in persisted settings.",
+  agentCapabilities: "Agent capabilities",
+  agentCapabilitiesDescription:
+    "Give Aegis bounded tools and an optional second local model. Tool calls remain visible and cancellable.",
+  runtimeTools: "RUNTIME TOOLS",
+  webTools: "Live web research",
+  webToolsDescription:
+    "Allow bounded HTTPS search and page distillation. Results are treated as untrusted source material.",
+  workerRouting: "Master → worker routing",
+  workerRoutingDescription:
+    "Let the primary model delegate summaries, validation and quick subtasks to a second endpoint.",
+  workerBaseUrl: "Worker base URL",
+  workerModel: "Worker model",
+  workerModelPlaceholder: "e.g. llama-3.2-3b-instruct",
+  workerApiKey: "Worker API key",
+  checkWorker: "Check worker",
+  workerConnected: "Worker reachable",
+  workerUnavailable: "Worker unavailable",
+  toolActivity: "Tool activity",
+  searchLocalModels: "Search indexed models…",
+  clearSearch: "Clear search",
+  noMatchingModels: "No indexed model matches",
+  noMatchingModelsDescription: "Try a different model name, family, architecture or quantization.",
   providerHealth: "Provider health",
   connected: "CONNECTED",
   diagnosticLatency: "round-trip",
@@ -165,6 +187,12 @@ const en = {
   databaseLoading: "Syncing local data",
   localModelLibrary: "Local model library",
   discoverLocalModels: "Discover local GGUF models",
+  zeroConfigDiscovery: "Zero-config model discovery",
+  zeroConfigDiscoveryDescription:
+    "Searches common LM Studio, Ollama, Hugging Face, Downloads and Models folders, then indexes only safe metadata.",
+  discoverNow: "Discover now",
+  discovering: "Discovering…",
+  autoDiscoveryComplete: "Scanned {roots} folder(s), found {count} model(s) in {duration} ms.",
   metadataOnly: "METADATA ONLY",
   modelLibraryIntro:
     "Register a directory and Aegis will read bounded GGUF metadata, index the files in SQLite and keep tensor data untouched.",
@@ -242,6 +270,8 @@ const en = {
   nativeRuntimePhaseError: "Runtime error",
   nativeRuntimeMissing:
     "llama-server was not found. Install the bundled package or choose its executable path.",
+  oneClickBind: "Select and load",
+  nativeRuntimeUnloadFirst: "Unload the active native model before binding another one.",
   nativeRuntimeMetrics: "Live runtime metrics",
   nativeRuntimeMetricsDescription:
     "Reported by the native server. Missing values remain unavailable.",
@@ -458,6 +488,28 @@ const tr: Record<TranslationKey, string> = {
   systemPromptPlaceholder: "Asistanın rolünü, üslubunu ve sınırlarını tanımla…",
   systemPromptHelp:
     "Bu konuşmadan önce sistem mesajı olarak gönderilir. API anahtarı kalıcı ayarlara hiçbir zaman girmez.",
+  agentCapabilities: "Ajan yetenekleri",
+  agentCapabilitiesDescription:
+    "Aegis'e sınırlandırılmış araçlar ve isteğe bağlı ikinci bir yerel model ver. Araç çağrıları görünür ve iptal edilebilir kalır.",
+  runtimeTools: "ÇALIŞMA ZAMANI ARAÇLARI",
+  webTools: "Canlı web araştırması",
+  webToolsDescription:
+    "Sınırlandırılmış HTTPS araması ve sayfa ayrıştırmasına izin ver. Sonuçlar güvenilmeyen kaynak materyali kabul edilir.",
+  workerRouting: "Master → worker yönlendirmesi",
+  workerRoutingDescription:
+    "Ana modelin özet, doğrulama ve hızlı alt görevleri ikinci bir uç noktaya devretmesine izin ver.",
+  workerBaseUrl: "Worker temel URL'si",
+  workerModel: "Worker modeli",
+  workerModelPlaceholder: "ör. llama-3.2-3b-instruct",
+  workerApiKey: "Worker API anahtarı",
+  checkWorker: "Worker'ı kontrol et",
+  workerConnected: "Worker erişilebilir",
+  workerUnavailable: "Worker kullanılamıyor",
+  toolActivity: "Araç etkinliği",
+  searchLocalModels: "İndekslenmiş modellerde ara…",
+  clearSearch: "Aramayı temizle",
+  noMatchingModels: "Aramayla eşleşen indekslenmiş model yok",
+  noMatchingModelsDescription: "Başka bir model adı, aile, mimari veya quantization dene.",
   providerHealth: "Sağlayıcı sağlığı",
   connected: "BAĞLI",
   diagnosticLatency: "gidiş-dönüş",
@@ -479,6 +531,12 @@ const tr: Record<TranslationKey, string> = {
   databaseLoading: "Yerel veriler eşitleniyor",
   localModelLibrary: "Yerel model kütüphanesi",
   discoverLocalModels: "Yerel GGUF modellerini keşfet",
+  zeroConfigDiscovery: "Sıfır ayarlı model keşfi",
+  zeroConfigDiscoveryDescription:
+    "Yaygın LM Studio, Ollama, Hugging Face, İndirilenler ve Modeller klasörlerini arar; yalnızca güvenli metadata indeksler.",
+  discoverNow: "Şimdi keşfet",
+  discovering: "Keşfediliyor…",
+  autoDiscoveryComplete: "{roots} klasör tarandı, {count} model {duration} ms içinde bulundu.",
   metadataOnly: "YALNIZCA METADATA",
   modelLibraryIntro:
     "Bir klasör kaydet; Aegis sınırlandırılmış GGUF metadata'sını okuyup dosyaları SQLite'a indeksler, tensor verisine dokunmaz.",
@@ -556,6 +614,8 @@ const tr: Record<TranslationKey, string> = {
   nativeRuntimePhaseError: "Çalışma zamanı hatası",
   nativeRuntimeMissing:
     "llama-server bulunamadı. Paketlenmiş sürümü kur veya çalıştırılabilir dosyanın yolunu seç.",
+  oneClickBind: "Seç ve yükle",
+  nativeRuntimeUnloadFirst: "Başka bir modeli bağlamadan önce etkin yerel modeli kaldır.",
   nativeRuntimeMetrics: "Canlı çalışma zamanı metrikleri",
   nativeRuntimeMetricsDescription:
     "Native sunucu tarafından raporlanır. Eksik değerler kullanılamıyor olarak kalır.",

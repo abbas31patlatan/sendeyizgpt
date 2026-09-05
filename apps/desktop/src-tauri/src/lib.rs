@@ -8,13 +8,16 @@ use aegis_inference::{
     NativeRuntimeStatus, ScannedModel, inspect_gguf_model, scan_model_directory,
 };
 use aegis_providers::{
-    ChatChunk, ChatCompletionSummary, ChatRequest, OpenAiCompatibleClient, ProviderConfig,
-    ProviderError, ProviderModel,
+    AssistantToolCall, ChatChunk, ChatCompletionSummary, ChatMessage, ChatRequest, ChatRole,
+    OpenAiCompatibleClient, ProviderConfig, ProviderError, ProviderModel, ToolCallDelta,
+    ToolCallFunction,
+    ToolExecution, builtin_tool_definitions, execute_builtin_tool, tool_system_instructions,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
@@ -59,6 +62,12 @@ enum ChatEvent {
     },
     Cancelled {
         operation_id: String,
+    },
+    Tool {
+        operation_id: String,
+        tool_id: String,
+        phase: String,
+        detail: String,
     },
 }
 
@@ -108,6 +117,17 @@ struct ModelLoadEstimate {
     model: ModelRecord,
     profile: LoadProfile,
     estimate: MemoryEstimate,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelDiscoverySummary {
+    libraries: Vec<ModelLibraryRecord>,
+    models: Vec<ModelRecord>,
+    scanned_roots: usize,
+    visited_files: usize,
+    issues: Vec<ModelScanIssueView>,
+    duration_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +339,124 @@ fn load_local_models(state: State<'_, DesktopState>) -> Result<Vec<ModelRecord>,
         .database
         .list_models(None)
         .map_err(|error| error.to_string())
+}
+
+fn default_model_roots() -> Vec<(String, PathBuf)> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let mut candidates = Vec::new();
+    if let Some(home) = home {
+        candidates.extend([
+            ("LM Studio · cache".to_owned(), home.join(".cache/lm-studio/models")),
+            ("Hugging Face · cache".to_owned(), home.join(".cache/huggingface/hub")),
+            ("Ollama · models".to_owned(), home.join(".ollama/models")),
+            ("Modeller".to_owned(), home.join("Models")),
+            ("İndirilenler".to_owned(), home.join("Downloads")),
+            ("Belgeler · modeller".to_owned(), home.join("Documents/Models")),
+        ]);
+    }
+    if let Some(local_app_data) = local_app_data {
+        candidates.extend([
+            ("LM Studio · local".to_owned(), local_app_data.join("LM Studio/models")),
+            ("LM Studio · app".to_owned(), local_app_data.join("lm-studio/models")),
+        ]);
+    }
+
+    let mut unique = std::collections::BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter(|(_, path)| unique.insert(path.to_string_lossy().to_ascii_lowercase()))
+        .collect()
+}
+
+fn automatic_library_id(path: &Path) -> String {
+    let digest = blake3::hash(path.to_string_lossy().as_bytes()).to_hex().to_string();
+    format!("model-library-auto-{}", &digest[..24])
+}
+
+#[tauri::command]
+async fn discover_local_models(
+    state: State<'_, DesktopState>,
+) -> Result<ModelDiscoverySummary, String> {
+    let database = Arc::clone(&state.database);
+    let started = Instant::now();
+    let mut scanned_roots = 0;
+    let mut visited_files = 0;
+    let mut issues = Vec::new();
+
+    for (name, candidate) in default_model_roots() {
+        if !candidate.is_dir() {
+            continue;
+        }
+        let canonical_path = match std::fs::canonicalize(&candidate) {
+            Ok(path) => path,
+            Err(error) => {
+                issues.push(ModelScanIssueView {
+                    path: candidate.to_string_lossy().into_owned(),
+                    message: format!("directory could not be resolved: {error}"),
+                });
+                continue;
+            }
+        };
+        let id = automatic_library_id(&canonical_path);
+        let now = unix_now_millis();
+        let library = ModelLibraryRecord {
+            id,
+            name,
+            root_path: canonical_path.to_string_lossy().into_owned(),
+            enabled: true,
+            last_scan_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        database
+            .save_model_library(&library)
+            .map_err(|error| error.to_string())?;
+        let root_for_scan = canonical_path.clone();
+        let report = tauri::async_runtime::spawn_blocking(move || scan_model_directory(root_for_scan))
+            .await
+            .map_err(|error| format!("model discovery worker failed: {error}"))?;
+        let report = match report {
+            Ok(report) => report,
+            Err(error) => {
+                issues.push(ModelScanIssueView {
+                    path: canonical_path.to_string_lossy().into_owned(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
+        scanned_roots += 1;
+        visited_files += report.visited_files;
+        issues.extend(report.issues.into_iter().map(|issue| ModelScanIssueView {
+            path: issue.path.to_string_lossy().into_owned(),
+            message: issue.message,
+        }));
+        let scan_time = unix_now_millis();
+        let records = report
+            .models
+            .iter()
+            .map(|model| model_record_from_scan(&library.id, model, scan_time))
+            .collect::<Vec<_>>();
+        database
+            .replace_model_library_models(&library.id, &records, scan_time)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(ModelDiscoverySummary {
+        libraries: database
+            .list_model_libraries()
+            .map_err(|error| error.to_string())?,
+        models: database
+            .list_models(None)
+            .map_err(|error| error.to_string())?,
+        scanned_roots,
+        visited_files,
+        issues,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 #[tauri::command]
@@ -596,6 +734,441 @@ fn unix_now_millis() -> i64 {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Default)]
+struct PendingAgentToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+fn prepare_agent_request(mut request: ChatRequest) -> ChatRequest {
+    let definitions = builtin_tool_definitions(request.web_tools, request.worker.is_some());
+    if definitions.is_empty() {
+        return request;
+    }
+    request.tools = definitions.clone();
+    let instructions = tool_system_instructions(&definitions);
+    if let Some(system_message) = request
+        .messages
+        .iter_mut()
+        .find(|message| message.role == ChatRole::System)
+    {
+        if !system_message.content.contains("Aegis araçları etkin") {
+            system_message.content.push_str("\n\n");
+            system_message.content.push_str(&instructions);
+        }
+    } else {
+        request.messages.insert(
+            0,
+            ChatMessage {
+                role: ChatRole::System,
+                content: instructions,
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
+    }
+    request
+}
+
+fn collect_tool_call(calls: &mut Vec<PendingAgentToolCall>, delta: ToolCallDelta) {
+    if calls.len() <= delta.index {
+        calls.resize_with(delta.index + 1, PendingAgentToolCall::default);
+    }
+    let call = &mut calls[delta.index];
+    if let Some(id) = delta.id.filter(|value| !value.trim().is_empty()) {
+        call.id = id;
+    }
+    if let Some(name) = delta.name.filter(|value| !value.trim().is_empty()) {
+        call.name.push_str(&name);
+    }
+    if let Some(arguments) = delta.arguments {
+        call.arguments.push_str(&arguments);
+    }
+}
+
+fn assistant_tool_call(call: &PendingAgentToolCall, index: usize) -> AssistantToolCall {
+    AssistantToolCall {
+        id: if call.id.trim().is_empty() {
+            format!("aegis-tool-call-{index}")
+        } else {
+            call.id.clone()
+        },
+        kind: "function".to_owned(),
+        function: ToolCallFunction {
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        },
+    }
+}
+
+async fn run_delegate_tool(
+    master: OpenAiCompatibleClient,
+    worker: Option<ProviderConfig>,
+    arguments: &Value,
+    max_tokens: u32,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<ToolExecution, String> {
+    let task = arguments
+        .get("task")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "delegate_task requires a non-empty task".to_owned())?;
+    if task.len() > 12_000 {
+        return Err("delegate task exceeds the 12,000 byte limit".to_owned());
+    }
+    let context = arguments
+        .get("context")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(24_000)
+        .collect::<String>();
+    let worker_config = worker.ok_or_else(|| "no worker model is configured".to_owned())?;
+    let worker_client = OpenAiCompatibleClient::new(worker_config.clone())
+        .map_err(|error| format!("worker is unavailable: {error}"))?;
+    let worker_prompt = if context.is_empty() {
+        task.to_owned()
+    } else {
+        format!("Task:\n{task}\n\nContext:\n{context}")
+    };
+    let worker_request = ChatRequest {
+        provider: worker_config,
+        messages: vec![
+            ChatMessage {
+                role: ChatRole::System,
+                content: "You are Aegis Worker. Complete only the delegated bounded task. Return concise, factual output for the master model. Do not call tools or claim actions you did not perform.".to_owned(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+            ChatMessage {
+                role: ChatRole::User,
+                content: worker_prompt.clone(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        ],
+        max_tokens: max_tokens.clamp(64, 4_096),
+        temperature: 0.2,
+        tools: Vec::new(),
+        worker: None,
+        web_tools: false,
+    };
+    let worker_result = match tokio::time::timeout(
+        Duration::from_secs(45),
+        worker_client.complete_chat(worker_request, cancellation.clone()),
+    )
+    .await
+    {
+        Ok(Ok(completion)) if !completion.message.content.trim().is_empty() => Ok(completion),
+        Ok(Ok(_)) => Err("worker returned an empty result".to_owned()),
+        Ok(Err(ProviderError::Cancelled)) => return Err("tool execution was cancelled".to_owned()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("worker timed out after 45 seconds".to_owned()),
+    };
+
+    match worker_result {
+        Ok(completion) => Ok(ToolExecution {
+            tool_id: "delegate_task".to_owned(),
+            output: json!({
+                "source": "worker",
+                "model": worker_client.model_name(),
+                "content": completion.message.content
+            })
+            .to_string(),
+            source_urls: Vec::new(),
+        }),
+        Err(worker_error) => {
+            // Graceful degradation: the master takes over the same bounded
+            // task when the worker endpoint is unavailable or times out.
+            let fallback_request = ChatRequest {
+                provider: master.config_clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: "You are the Aegis master model. The worker was unavailable. Solve the delegated task directly and state that you used the master fallback.".to_owned(),
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: worker_prompt,
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                ],
+                max_tokens: max_tokens.clamp(64, 4_096),
+                temperature: 0.2,
+                tools: Vec::new(),
+                worker: None,
+                web_tools: false,
+            };
+            let fallback = master
+                .complete_chat(fallback_request, cancellation)
+                .await
+                .map_err(|fallback_error| {
+                    format!(
+                        "worker failed ({worker_error}); master fallback failed ({fallback_error})"
+                    )
+                })?;
+            Ok(ToolExecution {
+                tool_id: "delegate_task".to_owned(),
+                output: json!({
+                    "source": "master_fallback",
+                    "content": fallback.message.content,
+                    "worker_error": worker_error
+                })
+                .to_string(),
+                source_urls: Vec::new(),
+            })
+        }
+    }
+}
+
+async fn run_agent_tool(
+    master: OpenAiCompatibleClient,
+    worker: Option<ProviderConfig>,
+    call: PendingAgentToolCall,
+    max_tokens: u32,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<ToolExecution, String> {
+    let arguments: Value = serde_json::from_str(&call.arguments)
+        .map_err(|error| format!("invalid tool JSON arguments: {error}"))?;
+    if call.name == "delegate_task" {
+        return run_delegate_tool(master, worker, &arguments, max_tokens, cancellation).await;
+    }
+    execute_builtin_tool(&call.name, &arguments, cancellation)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn is_tool_schema_unsupported(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::HttpStatus {
+            status: 400 | 404 | 422,
+            ..
+        }
+    )
+}
+
+async fn stream_chat_with_tools(
+    client: OpenAiCompatibleClient,
+    request: ChatRequest,
+    app: AppHandle,
+    operation_id: String,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Result<ChatCompletionSummary, ProviderError> {
+    let prepared = prepare_agent_request(request);
+    let definitions = builtin_tool_definitions(prepared.web_tools, prepared.worker.is_some());
+    if definitions.is_empty() {
+        let operation_for_events = operation_id.clone();
+        let app_for_chunks = app.clone();
+        return client
+            .stream_chat(prepared, cancellation, move |chunk| match chunk {
+                ChatChunk::Content { text } => emit_chat(
+                    &app_for_chunks,
+                    ChatEvent::Token {
+                        operation_id: operation_for_events.clone(),
+                        text,
+                    },
+                ),
+                ChatChunk::Reasoning { text } => emit_chat(
+                    &app_for_chunks,
+                    ChatEvent::Reasoning {
+                        operation_id: operation_for_events.clone(),
+                        text,
+                    },
+                ),
+                ChatChunk::ToolCallDelta(_) => {}
+            })
+            .await;
+    }
+
+    let plain_fallback = {
+        let mut fallback = prepared.clone();
+        fallback.tools.clear();
+        fallback.web_tools = false;
+        fallback.worker = None;
+        fallback
+    };
+    let mut working = prepared;
+    let mut tool_error_counts = std::collections::BTreeMap::<String, u8>::new();
+
+    for round in 0..8 {
+        if cancellation.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        let mut pending = Vec::new();
+        let operation_for_events = operation_id.clone();
+        let app_for_chunks = app.clone();
+        let result = client
+            .stream_chat(working.clone(), cancellation.clone(), move |chunk| match chunk {
+                ChatChunk::Content { text } => emit_chat(
+                    &app_for_chunks,
+                    ChatEvent::Token {
+                        operation_id: operation_for_events.clone(),
+                        text,
+                    },
+                ),
+                ChatChunk::Reasoning { text } => emit_chat(
+                    &app_for_chunks,
+                    ChatEvent::Reasoning {
+                        operation_id: operation_for_events.clone(),
+                        text,
+                    },
+                ),
+                ChatChunk::ToolCallDelta(delta) => collect_tool_call(&mut pending, delta),
+            })
+            .await;
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) if round == 0 && is_tool_schema_unsupported(&error) => {
+                let operation_for_events = operation_id.clone();
+                let app_for_chunks = app.clone();
+                return client
+                    .stream_chat(plain_fallback, cancellation, move |chunk| match chunk {
+                        ChatChunk::Content { text } => emit_chat(
+                            &app_for_chunks,
+                            ChatEvent::Token {
+                                operation_id: operation_for_events.clone(),
+                                text,
+                            },
+                        ),
+                        ChatChunk::Reasoning { text } => emit_chat(
+                            &app_for_chunks,
+                            ChatEvent::Reasoning {
+                                operation_id: operation_for_events.clone(),
+                                text,
+                            },
+                        ),
+                        ChatChunk::ToolCallDelta(_) => {}
+                    })
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
+        pending.retain(|call| !call.name.trim().is_empty());
+        if pending.is_empty() {
+            return Ok(summary);
+        }
+
+        for (index, call) in pending.iter_mut().enumerate() {
+            if call.id.trim().is_empty() {
+                call.id = format!("aegis-tool-call-{index}");
+            }
+        }
+
+        let assistant_calls = pending
+            .iter()
+            .enumerate()
+            .map(|(index, call)| assistant_tool_call(call, index))
+            .collect::<Vec<_>>();
+        working.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: String::new(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(assistant_calls),
+        });
+
+        for call in &pending {
+            emit_chat(
+                &app,
+                ChatEvent::Tool {
+                    operation_id: operation_id.clone(),
+                    tool_id: call.name.clone(),
+                    phase: "running".to_owned(),
+                    detail: "Aegis aracı çalışıyor".to_owned(),
+                },
+            );
+        }
+
+        let max_tokens = working.max_tokens;
+        let worker_config = working.worker.clone();
+        let futures = pending.iter().cloned().map(|call| {
+            let master = client.clone();
+            let worker = worker_config.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                let result = run_agent_tool(
+                    master,
+                    worker,
+                    call.clone(),
+                    max_tokens,
+                    cancellation,
+                )
+                .await;
+                (call, result)
+            }
+        });
+        let outcomes = futures_util::future::join_all(futures).await;
+        for (call, result) in outcomes {
+            if cancellation.is_cancelled() {
+                return Err(ProviderError::Cancelled);
+            }
+            let call_id = call.id.clone();
+            let (output, phase, detail) = match result {
+                Ok(execution) => {
+                    tool_error_counts.remove(&call.name);
+                    let source_detail = if execution.source_urls.is_empty() {
+                        "tamamlandı".to_owned()
+                    } else {
+                        format!("tamamlandı · {} kaynak", execution.source_urls.len())
+                    };
+                    (execution.output, "completed".to_owned(), source_detail)
+                }
+                Err(error) => {
+                    let count = tool_error_counts.entry(call.name.clone()).or_insert(0);
+                    *count = count.saturating_add(1);
+                    if *count >= 3 {
+                        return Err(ProviderError::InvalidRequest(format!(
+                            "tool {} failed three times: {error}",
+                            call.name
+                        )));
+                    }
+                    (
+                        json!({
+                            "error": error,
+                            "retryable": true,
+                            "attempt": *count,
+                            "instruction": "Correct the JSON arguments and call the same tool again."
+                        })
+                        .to_string(),
+                        "error".to_owned(),
+                        format!("düzeltme bekleniyor · deneme {}", *count),
+                    )
+                }
+            };
+            emit_chat(
+                &app,
+                ChatEvent::Tool {
+                    operation_id: operation_id.clone(),
+                    tool_id: call.name.clone(),
+                    phase,
+                    detail,
+                },
+            );
+            working.messages.push(ChatMessage {
+                role: ChatRole::Tool,
+                content: output,
+                name: Some(call.name),
+                tool_call_id: Some(call_id),
+                tool_calls: None,
+            });
+        }
+    }
+    Err(ProviderError::InvalidRequest(
+        "tool loop exceeded the maximum of 8 rounds".to_owned(),
+    ))
+}
+
 #[tauri::command]
 async fn start_chat(
     app: AppHandle,
@@ -621,23 +1194,14 @@ async fn start_chat(
                 operation_id: operation_id_for_task.clone(),
             },
         );
-        let operation_for_events = operation_id_for_task.clone();
-        let app_for_chunks = app_for_task.clone();
-        let result = client
-            .stream_chat(request, cancellation, move |chunk| {
-                let event = match chunk {
-                    ChatChunk::Content { text } => ChatEvent::Token {
-                        operation_id: operation_for_events.clone(),
-                        text,
-                    },
-                    ChatChunk::Reasoning { text } => ChatEvent::Reasoning {
-                        operation_id: operation_for_events.clone(),
-                        text,
-                    },
-                };
-                emit_chat(&app_for_chunks, event);
-            })
-            .await;
+        let result = stream_chat_with_tools(
+            client,
+            request,
+            app_for_task.clone(),
+            operation_id_for_task.clone(),
+            cancellation,
+        )
+        .await;
 
         match result {
             Ok(summary) => emit_chat(
@@ -803,6 +1367,7 @@ pub fn run() {
             save_model_library,
             delete_model_library,
             load_local_models,
+            discover_local_models,
             scan_model_library,
             load_model_profiles,
             save_model_profile,

@@ -4,6 +4,13 @@
 //! cancellation. The desktop shell only receives typed chat events and never
 //! needs to handle provider-specific wire formats.
 
+pub mod tools;
+
+pub use tools::{
+    BuiltinToolError, ToolExecution, builtin_tool_definitions, execute_builtin_tool,
+    tool_system_instructions,
+};
+
 use futures_util::StreamExt;
 use reqwest::{Response, header};
 use serde::{Deserialize, Serialize};
@@ -16,6 +23,8 @@ use url::{Host, Url};
 const MAX_MESSAGES: usize = 128;
 const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_SSE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TOOL_DEFINITIONS: usize = 32;
+const MAX_JSON_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_base_url() -> String {
     "http://127.0.0.1:11434/v1".to_owned()
@@ -101,6 +110,12 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    #[serde(default)]
+    pub tools: Vec<ToolDefinition>,
+    #[serde(default)]
+    pub worker: Option<ProviderConfig>,
+    #[serde(default)]
+    pub web_tools: bool,
 }
 
 impl ChatRequest {
@@ -116,6 +131,14 @@ impl ChatRequest {
                 "chat history cannot contain more than {MAX_MESSAGES} messages"
             )));
         }
+        if self.tools.len() > MAX_TOOL_DEFINITIONS {
+            return Err(ProviderError::InvalidRequest(format!(
+                "a chat request cannot expose more than {MAX_TOOL_DEFINITIONS} tools"
+            )));
+        }
+        if let Some(worker) = &self.worker {
+            worker.validate()?;
+        }
         if self.max_tokens == 0 || self.max_tokens > 131_072 {
             return Err(ProviderError::InvalidRequest(
                 "max_tokens must be between 1 and 131072".to_owned(),
@@ -127,7 +150,9 @@ impl ChatRequest {
             ));
         }
         for message in &self.messages {
-            if message.content.trim().is_empty() {
+            let tool_call_message =
+                message.role == ChatRole::Assistant && message.tool_calls.is_some();
+            if message.content.trim().is_empty() && !tool_call_message {
                 return Err(ProviderError::InvalidRequest(
                     "chat messages cannot be empty".to_owned(),
                 ));
@@ -146,6 +171,65 @@ impl ChatRequest {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<AssistantToolCall>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssistantToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolDefinition {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolFunctionDefinition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolFunctionDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+impl ToolDefinition {
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        parameters: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind: "function".to_owned(),
+            function: ToolFunctionDefinition {
+                name: name.into(),
+                description: description.into(),
+                parameters,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +247,7 @@ pub enum ChatRole {
 pub enum ChatChunk {
     Content { text: String },
     Reasoning { text: String },
+    ToolCallDelta(ToolCallDelta),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,6 +265,14 @@ pub struct ChatCompletionSummary {
     pub finish_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatCompletion {
+    pub message: ChatMessage,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub finish_reason: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct OpenAiCompatibleClient {
     http: reqwest::Client,
@@ -191,7 +284,7 @@ impl OpenAiCompatibleClient {
     pub fn new(config: ProviderConfig) -> Result<Self, ProviderError> {
         let base_url = config.validate()?;
         let http = reqwest::Client::builder()
-            .user_agent("Aegis-AI/0.1")
+            .user_agent("Aegis-AI/0.2")
             .connect_timeout(Duration::from_secs(5))
             .read_timeout(Duration::from_secs(120))
             .build()
@@ -225,6 +318,14 @@ impl OpenAiCompatibleClient {
             .collect())
     }
 
+    pub fn model_name(&self) -> &str {
+        &self.config.model
+    }
+
+    pub fn config_clone(&self) -> ProviderConfig {
+        self.config.clone()
+    }
+
     pub async fn stream_chat<F>(
         &self,
         request: ChatRequest,
@@ -242,6 +343,7 @@ impl OpenAiCompatibleClient {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stream: true,
+            tools: request.tools,
         };
         let response = tokio::select! {
             _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
@@ -309,6 +411,60 @@ impl OpenAiCompatibleClient {
         })
     }
 
+    /// Performs one bounded non-streaming completion. The worker path uses
+    /// this for delegated subtasks so the master stream remains cancellable.
+    pub async fn complete_chat(
+        &self,
+        request: ChatRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ChatCompletion, ProviderError> {
+        request.validate()?;
+        let body = ApiChatRequest {
+            model: request.provider.model.clone(),
+            messages: request.messages,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            stream: false,
+            tools: request.tools,
+        };
+        let response = tokio::select! {
+            _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
+            result = self.authorized(self.http.post(self.endpoint("chat/completions")).json(&body)).send() => {
+                result.map_err(|error| ProviderError::Transport(error.to_string()))?
+            }
+        };
+        let response = checked_response(response).await?;
+        let bytes = bounded_response_bytes(
+            response,
+            &cancellation,
+            MAX_JSON_RESPONSE_BYTES,
+        )
+        .await?;
+        let payload: ApiChatResponse = serde_json::from_slice(&bytes)
+            .map_err(|error| ProviderError::InvalidResponse(error.to_string()))?;
+        let choice = payload
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| ProviderError::InvalidResponse("provider returned no choices".to_owned()))?;
+        let message = choice.message;
+        Ok(ChatCompletion {
+            message: ChatMessage {
+                role: message.role,
+                content: message.content.unwrap_or_default(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: message.tool_calls,
+            },
+            prompt_tokens: payload.usage.as_ref().and_then(|usage| usage.prompt_tokens),
+            completion_tokens: payload
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.completion_tokens),
+            finish_reason: choice.finish_reason,
+        })
+    }
+
     fn endpoint(&self, path: &str) -> Url {
         let mut url = self.base_url.clone();
         let mut base_path = url.path().trim_end_matches('/').to_owned();
@@ -347,6 +503,36 @@ async fn checked_response(response: Response) -> Result<Response, ProviderError>
         status,
         body: sanitize_error(&body),
     })
+}
+
+async fn bounded_response_bytes(
+    response: Response,
+    cancellation: &CancellationToken,
+    limit: usize,
+) -> Result<Vec<u8>, ProviderError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(ProviderError::InvalidResponse(
+            "provider response exceeded the size limit".to_owned(),
+        ));
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(next) = tokio::select! {
+        _ = cancellation.cancelled() => return Err(ProviderError::Cancelled),
+        next = stream.next() => next,
+    } {
+        let chunk = next.map_err(|error| ProviderError::Transport(error.to_string()))?;
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(ProviderError::InvalidResponse(
+                "provider response exceeded the size limit".to_owned(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 fn sanitize_error(value: &str) -> String {
@@ -389,6 +575,17 @@ where
     let Some(delta) = choice.delta.as_ref() else {
         return Ok(false);
     };
+    for tool_call in &delta.tool_calls {
+        on_chunk(ChatChunk::ToolCallDelta(ToolCallDelta {
+            index: tool_call.index.unwrap_or_default(),
+            id: tool_call.id.clone(),
+            name: tool_call.function.as_ref().and_then(|function| function.name.clone()),
+            arguments: tool_call
+                .function
+                .as_ref()
+                .and_then(|function| function.arguments.clone()),
+        }));
+    }
     if let Some(text) = delta
         .reasoning_content
         .as_deref()
@@ -493,6 +690,8 @@ struct ApiChatRequest {
     max_tokens: u32,
     temperature: f32,
     stream: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ToolDefinition>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -517,6 +716,50 @@ struct ApiDelta {
     content: Option<String>,
     #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ApiToolCallDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiToolCallDelta {
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<ApiFunctionDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiChatResponse {
+    #[serde(default)]
+    choices: Vec<ApiCompletionChoice>,
+    #[serde(default)]
+    usage: Option<ApiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiCompletionChoice {
+    message: ApiResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiResponseMessage {
+    role: ChatRole,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<AssistantToolCall>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -598,6 +841,9 @@ mod tests {
             messages: Vec::new(),
             max_tokens: 10,
             temperature: 0.7,
+            tools: Vec::new(),
+            worker: None,
+            web_tools: false,
         };
         assert!(matches!(
             request.validate(),
@@ -644,5 +890,51 @@ mod tests {
             .is_retryable()
         );
         assert!(!ProviderError::InvalidRequest("bad".to_owned()).is_retryable());
+    }
+
+    #[test]
+    fn serializes_openai_tool_call_round_trip_messages() {
+        let tool = ToolDefinition::function(
+            "calculator",
+            "Evaluate arithmetic",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"expression": {"type": "string"}}
+            }),
+        );
+        let body = ApiChatRequest {
+            model: "master".to_owned(),
+            messages: vec![
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: String::new(),
+                    name: None,
+                    tool_call_id: None,
+                    tool_calls: Some(vec![AssistantToolCall {
+                        id: "call-1".to_owned(),
+                        kind: "function".to_owned(),
+                        function: ToolCallFunction {
+                            name: "calculator".to_owned(),
+                            arguments: r#"{"expression":"2+2"}"#.to_owned(),
+                        },
+                    }]),
+                },
+                ChatMessage {
+                    role: ChatRole::Tool,
+                    content: r#"{"result":4}"#.to_owned(),
+                    name: Some("calculator".to_owned()),
+                    tool_call_id: Some("call-1".to_owned()),
+                    tool_calls: None,
+                },
+            ],
+            max_tokens: 64,
+            temperature: 0.2,
+            stream: true,
+            tools: vec![tool],
+        };
+        let value = serde_json::to_value(body).expect("tool request serializes");
+        assert_eq!(value["tools"][0]["type"], "function");
+        assert_eq!(value["messages"][0]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(value["messages"][1]["tool_call_id"], "call-1");
     }
 }

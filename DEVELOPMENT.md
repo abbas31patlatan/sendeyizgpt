@@ -55,6 +55,26 @@ The provider adapter validates message count, message size, sampling values,
 base URL credentials, response framing and cancellation before a request can
 start.
 
+### Agent tools and multi-LLM routing
+
+The desktop command `start_chat` builds a runtime tool registry from the request:
+the always-on read-only built-ins are calculator, UTC time, JSON formatting and
+text statistics; optional web tools provide HTTPS-only search/page distillation;
+an optional worker endpoint adds bounded `delegate_task`. The registry is sent as
+OpenAI-compatible function schemas and a short system instruction is inserted by
+the native shell, so the frontend does not need to duplicate orchestration rules.
+
+The native loop supports streamed tool-call deltas, parallel calls in one round,
+visible `tool` events, cancellation and up to eight total rounds. Invalid JSON or
+tool errors are returned to the model for correction up to three attempts per
+tool. If a provider rejects the tool schema, the request retries once as ordinary
+streaming chat. Worker calls use a separate non-streaming bounded completion; a
+worker transport/timeout failure invokes the master with the same task.
+
+When adding a tool, keep it read-only unless it has a manifest, explicit risk
+level, Permission Broker preview and audit path. Web content must be treated as
+untrusted data and must never be promoted to a system message.
+
 ### Local prompt automations
 
 Automations are intentionally limited to repeatable chat prompts. Verify the
@@ -93,6 +113,11 @@ after `/health` before claiming that a model was loaded. Run the focused tests w
 cargo test -p aegis-inference catalog
 cargo test -p aegis-database model_library_repository
 ```
+
+The Model library also offers **Discover now** and a one-click **Select and load**
+action. Discovery checks the supported common roots in the user's profile and is
+safe to repeat; a background refresh runs while the app is focused. Custom paths
+remain explicitly registered and scanned through the same bounded scanner.
 
 ### Native llama.cpp runtime
 

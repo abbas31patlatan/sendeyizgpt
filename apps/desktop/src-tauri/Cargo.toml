@@ -18,6 +18,9 @@ aegis-core.workspace = true
 aegis-database.workspace = true
 aegis-inference.workspace = true
 aegis-providers.workspace = true
+blake3.workspace = true
+futures-util.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tauri = { version = "2.8", features = [] }
 uuid.workspace = true

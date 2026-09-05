@@ -16,6 +16,10 @@ Security is a runtime invariant, not a prompt-writing convention.
    logs, prompts and diagnostic bundles.
 8. Provider API keys are session-only in the current chat slice and are never
    written to SQLite, localStorage or the workspace registry.
+9. Public web retrieval is HTTPS-only, rejects loopback/private/link-local hosts,
+   follows no redirects and returns bounded untrusted source material.
+10. Tool schemas and arguments are bounded at the native boundary. Tool failures
+    are returned as data for correction, never as executable instructions.
 
 ## Local model catalog boundary
 
@@ -50,6 +54,25 @@ Native tensor loading is a separate, supervised process boundary:
 - The bundled release is CPU-native. GPU acceleration requires a compatible
   external llama.cpp build selected explicitly by path or PATH.
 
+## Agent tool boundary
+
+The current agent loop exposes only read-only built-ins and a controlled public-web
+retrieval path:
+
+- Calculator, UTC clock, JSON formatting and text statistics do not touch the host.
+- Web search uses a fixed HTTPS search endpoint. Page retrieval accepts only HTTPS
+  public hosts, resolves and checks DNS answers for private/local ranges, disables
+  redirects, limits response bytes and strips active HTML blocks before the text
+  enters the model context.
+- Master-to-worker delegation accepts only a bounded task/context payload. The
+  worker receives a separate request with tools disabled; timeout, transport and
+  provider failures are handled by a master fallback.
+- Tool calls are executed concurrently only within the current request, each
+  outcome is emitted to the UI, and malformed arguments can be corrected at most
+  three times per tool before the request fails closed.
+- Web pages, search snippets, provider responses and tool output remain data. They
+  are never appended as system/developer instructions.
+
 ## Trust zones
 
 | Zone | Examples | Allowed authority |
@@ -76,12 +99,11 @@ Do not include real API keys, personal files or private model assets in an issue
 The first report should include the smallest reproducible input, affected
 worker/core boundary, platform and whether a permit was required.
 
-## Deliberate limitations after M2b
+## Deliberate limitations after M3a
 
 The current product does not expose host filesystem, shell, browser, microphone,
-camera, screen or keyboard/mouse executors. Native GGUF tensor loading is real and
-supervised, but GPU capability detection, detailed device telemetry and effectful
-tool workers remain separate milestones. Workspace registration is still only
-read-only path metadata validation, and neither it nor model loading is a file
-access grant.
-
+camera, screen or keyboard/mouse executors. Native GGUF tensor loading and the
+read-only web/tool loop are real and supervised, but GPU capability detection,
+detailed device telemetry and effectful tool workers remain separate milestones.
+Workspace registration is still only read-only path metadata validation, and
+neither it nor model loading is a file access grant.

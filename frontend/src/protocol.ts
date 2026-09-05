@@ -80,11 +80,27 @@ export const ProviderConfigSchema = z.object({
 
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 
+export const ToolFunctionDefinitionSchema = z.object({
+  name: z.string().min(1),
+  description: z.string(),
+  parameters: z.unknown(),
+});
+
+export const ToolDefinitionSchema = z.object({
+  type: z.literal("function"),
+  function: ToolFunctionDefinitionSchema,
+});
+
+export type ToolDefinition = z.infer<typeof ToolDefinitionSchema>;
+
 export const ChatRequestSchema = z.object({
   provider: ProviderConfigSchema,
   messages: z.array(ChatMessageSchema).min(1),
   max_tokens: z.number().int().positive(),
   temperature: z.number().min(0).max(2),
+  tools: ToolDefinitionSchema.array().optional(),
+  worker: ProviderConfigSchema.optional(),
+  web_tools: z.boolean().optional(),
 });
 
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;
@@ -162,6 +178,17 @@ export const ModelScanSummarySchema = z.object({
 });
 
 export type ModelScanSummary = z.infer<typeof ModelScanSummarySchema>;
+
+export const ModelDiscoverySummarySchema = z.object({
+  libraries: ModelLibrarySchema.array(),
+  models: LocalModelSchema.array(),
+  scannedRoots: z.number().int().nonnegative(),
+  visitedFiles: z.number().int().nonnegative(),
+  issues: ModelScanIssueSchema.array(),
+  durationMs: z.number().int().nonnegative(),
+});
+
+export type ModelDiscoverySummary = z.infer<typeof ModelDiscoverySummarySchema>;
 
 export const LoadPresetSchema = z.enum(["eco", "balanced", "performance", "custom"]);
 export type LoadPreset = z.infer<typeof LoadPresetSchema>;
@@ -327,6 +354,13 @@ export const ChatEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("cancelled"),
     operation_id: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal("tool"),
+    operation_id: z.string().min(1),
+    tool_id: z.string().min(1),
+    phase: z.enum(["running", "completed", "error"]),
+    detail: z.string(),
   }),
 ]);
 

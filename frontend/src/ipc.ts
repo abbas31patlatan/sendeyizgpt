@@ -9,6 +9,7 @@ import {
   ModelLoadEstimateSchema,
   ModelProfileSchema,
   ModelScanSummarySchema,
+  ModelDiscoverySummarySchema,
   LocalModelSchema,
   PersistedWorkspaceSchema,
   ProviderDiagnosticsSchema,
@@ -26,6 +27,7 @@ import {
   type ModelLoadEstimate,
   type ModelProfile,
   type ModelScanSummary,
+  type ModelDiscoverySummary,
   type PersistedWorkspace,
   type ProviderConfig,
   type ProviderDiagnostics,
@@ -165,6 +167,11 @@ export async function loadLocalModels(): Promise<LocalModel[]> {
 export async function scanModelLibrary(libraryId: string): Promise<ModelScanSummary> {
   const raw = await invoke<unknown>("scan_model_library", { libraryId });
   return ModelScanSummarySchema.parse(raw);
+}
+
+export async function discoverLocalModels(): Promise<ModelDiscoverySummary> {
+  const raw = await invoke<unknown>("discover_local_models");
+  return ModelDiscoverySummarySchema.parse(raw);
 }
 
 export async function loadModelProfiles(): Promise<ModelProfile[]> {

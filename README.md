@@ -7,7 +7,7 @@ mediated by a native Permission Broker.
 
 ## Current status
 
-Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model catalog/preflight, M2b supervised native llama.cpp runtime and M2c local prompt automations are in place:
+Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model catalog/preflight, M2b supervised native llama.cpp runtime, M2c local prompt automations and M3a bounded agent tools are in place:
 
 - Tauri 2 + React/TypeScript desktop shell
 - Rust workspace with typed protocol, IPC authentication helpers, inference and agent contracts
@@ -25,6 +25,10 @@ Milestone 0 foundation, M1a local chat, M1b persistence/workspace, M2a model cat
 - Supervised native llama.cpp `llama-server` lifecycle: GGUF revalidation, real tensor-load health gate, loopback endpoint and clean unload
 - Bilingual native runtime controls with bundled pinned CPU runtime support and explicit external GPU-runtime path selection
 - Durable local prompt routines that run through the active provider, create inspectable result conversations and repeat only while the desktop app is open
+- Zero-config local GGUF discovery across common LM Studio, Ollama, Hugging Face, Downloads and Models roots, with bounded background refresh and searchable inventory
+- One-click native model binding: fresh metadata/preflight validation, real `llama-server` tensor load and automatic loopback provider routing
+- OpenAI-compatible function-calling loop with bounded calculator, clock, JSON, text analysis, public web search/page distillation and master-to-worker delegation
+- Parallel tool execution, visible tool activity, cancellation, schema-unsupported fallback and per-tool self-correction capped at three attempts
 - Per-provider system prompt, conversation rename/Markdown export and strict bilingual UX
 - Architecture, security, plugin and development documentation
 
@@ -33,8 +37,10 @@ Native llama.cpp tensor loading and generation are now wired through a supervise
 executable on a random loopback port and marks the model ready only after the
 server's `/health` gate succeeds. The Windows package builds a pinned, static CPU
 runtime from upstream; a compatible external GPU build can be selected by PATH or
-an explicit executable path. Browser, audio, vision and real tool execution remain
-separate future worker capabilities.
+an explicit executable path. The agent tool loop is deliberately limited to
+read-only local computation and safe public-web retrieval; host filesystem,
+shell, browser control, audio, vision and effectful integrations remain separate
+permissioned worker boundaries.
 
 ## Prerequisites
 
@@ -89,6 +95,30 @@ Default local endpoint: `http://127.0.0.1:11434/v1` (Ollama). LM Studio
 normally uses `http://127.0.0.1:1234/v1`. Quick provider cards can apply
 either local endpoint. The optional API key is held only in memory for the
 current session and is never persisted by the frontend or SQLite.
+
+### Zero-config model discovery and agent tools
+
+Open **Model library** and choose **Discover now**. Aegis checks common local
+model roots in the background, parses only bounded GGUF metadata and shows a
+searchable inventory. **Select and load** performs a fresh preflight and binds the
+real native runtime to the chat provider automatically. No tensor data is copied
+by the catalog scanner.
+
+The **Agent capabilities** panel enables two optional capabilities:
+
+- **Live web research** exposes bounded HTTPS search and page distillation. Results
+  are visible in chat activity and are always marked as untrusted source material;
+  the model is instructed to cite returned URLs.
+- **Master → worker routing** adds a second OpenAI-compatible endpoint. The master
+  can delegate bounded summaries, validation and quick subtasks. Calls run
+  concurrently when possible, and an unavailable worker falls back to the master
+  instead of failing the whole conversation.
+
+Every request receives the active function schemas at runtime. Tool arguments are
+validated, malformed calls receive a bounded correction prompt (maximum three
+attempts per tool), and unsupported provider tool schemas fall back to ordinary
+streaming chat. Tools never expose a shell, arbitrary file access or a generic
+HTTP client.
 
 ### Native llama.cpp local chat
 

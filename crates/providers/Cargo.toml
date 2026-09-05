@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
