@@ -356,7 +356,7 @@ async fn request_with_cancel(
     cancellation: CancellationToken,
 ) -> Result<Response, BuiltinToolError> {
     tokio::select! {
-        _ = cancellation.cancelled() => return Err(BuiltinToolError::Cancelled),
+        _ = cancellation.cancelled() => Err(BuiltinToolError::Cancelled),
         result = request.send() => result.map_err(|error| BuiltinToolError::Network(error.to_string())),
     }
 }
