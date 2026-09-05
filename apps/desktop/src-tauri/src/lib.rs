@@ -1030,7 +1030,7 @@ async fn stream_chat_with_tools(
             .stream_chat(
                 working.clone(),
                 cancellation.clone(),
-                move |chunk| match chunk {
+                |chunk| match chunk {
                     ChatChunk::Content { text } => emit_chat(
                         &app_for_chunks,
                         ChatEvent::Token {
